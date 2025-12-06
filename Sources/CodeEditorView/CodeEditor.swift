@@ -62,6 +62,7 @@ public struct CodeEditor {
 
   @Environment(\.codeEditorLayoutConfiguration)      private var layoutConfiguration
   @Environment(\.codeEditorIndentationConfiguration) private var indentationConfiguration
+  @Environment(\.codeEditorAutoBraceConfiguration)   private var autoBraceConfiguration
   @Environment(\.codeEditorSetActions)               private var setActions
   @Environment(\.codeEditorSetInfo)                  private var setInfo
 
@@ -245,6 +246,33 @@ extension CodeEditor {
 extension EnvironmentValues {
 
   @Entry public var codeEditorLayoutConfiguration: CodeEditor.LayoutConfiguration = .standard
+}
+
+
+// MARK: Auto-brace configuration
+
+extension CodeEditor {
+
+  /// Configuration for automatic brace completion behavior.
+  ///
+  public struct AutoBraceConfiguration: Equatable {
+
+    /// Whether to automatically insert a closing brace and newline when pressing Enter after `{`.
+    ///
+    public var completeOnEnter: Bool
+
+    public init(completeOnEnter: Bool) {
+      self.completeOnEnter = completeOnEnter
+    }
+
+    public static let enabled = AutoBraceConfiguration(completeOnEnter: true)
+    public static let disabled = AutoBraceConfiguration(completeOnEnter: false)
+  }
+}
+
+extension EnvironmentValues {
+
+  @Entry public var codeEditorAutoBraceConfiguration: CodeEditor.AutoBraceConfiguration = .enabled
 }
 
 
@@ -533,6 +561,7 @@ extension CodeEditor: UIViewRepresentable {
                             with: language,
                             viewLayout: definitiveLayout,
                             indentation: indentationConfiguration,
+                            autoBrace: autoBraceConfiguration,
                             theme: context.environment.codeEditorTheme,
                             setText: setText(_:),
                             setMessages: { context.coordinator.messages = $0 })
@@ -614,6 +643,7 @@ extension CodeEditor: UIViewRepresentable {
     if theme.id != codeView.theme.id { codeView.theme = theme }
     if definitiveLayout != codeView.viewLayout { codeView.viewLayout = definitiveLayout }
     if indentationConfiguration != codeView.indentation { codeView.indentation = indentationConfiguration }
+    if autoBraceConfiguration != codeView.autoBrace { codeView.autoBrace = autoBraceConfiguration }
     // Equality on language configurations implies the same name and the same language service.
     if language != codeView.language {
       codeView.language                 = language
@@ -688,6 +718,7 @@ extension CodeEditor: NSViewRepresentable {
                             with: language,
                             viewLayout: definitiveLayout,
                             indentation: indentationConfiguration,
+                            autoBrace: autoBraceConfiguration,
                             theme: context.environment.codeEditorTheme,
                             setText: setText(_:),
                             setMessages: { context.coordinator.messages = $0 })
@@ -822,6 +853,7 @@ extension CodeEditor: NSViewRepresentable {
     if theme.id != codeView.theme.id { codeView.theme = theme }
     if definitiveLayout != codeView.viewLayout { codeView.viewLayout = definitiveLayout }
     if indentationConfiguration != codeView.indentation { codeView.indentation = indentationConfiguration }
+    if autoBraceConfiguration != codeView.autoBrace { codeView.autoBrace = autoBraceConfiguration }
     // Equality on language configurations implies the same name and the same language service.
     if language != codeView.language {
 

@@ -128,6 +128,10 @@ final class CodeView: UITextView {
   ///
   var indentation: CodeEditor.IndentationConfiguration = .standard
 
+  /// The current auto-brace configuration.
+  ///
+  var autoBrace: CodeEditor.AutoBraceConfiguration = .enabled
+
   /// Hook to propagate message sets upwards in the view hierarchy.
   ///
   let setMessages: (Set<TextLocated<Message>>) -> Void
@@ -142,10 +146,11 @@ final class CodeView: UITextView {
 
   /// Designated initializer for code views with a gutter.
   ///
-  init(frame: CGRect, 
+  init(frame: CGRect,
        with language: LanguageConfiguration,
        viewLayout: CodeEditor.LayoutConfiguration,
        indentation: CodeEditor.IndentationConfiguration,
+       autoBrace: CodeEditor.AutoBraceConfiguration = .enabled,
        theme: Theme,
        setText: @escaping (String) -> Void,
        setMessages: @escaping (Set<TextLocated<Message>>) -> Void)
@@ -155,6 +160,7 @@ final class CodeView: UITextView {
     self.language    = language
     self.viewLayout  = viewLayout
     self.indentation = indentation
+    self.autoBrace   = autoBrace
     self.setMessages = setMessages
 
     // Use custom components that are gutter-aware and support code-specific editing actions and highlighting.
@@ -456,10 +462,14 @@ final class CodeView: NSTextView {
   ///
   @Invalidating(.layout)
   var viewLayout: CodeEditor.LayoutConfiguration = .standard
-  
+
   /// The current indentation configuration.
   ///
   var indentation: CodeEditor.IndentationConfiguration = .standard
+
+  /// The current auto-brace configuration.
+  ///
+  var autoBrace: CodeEditor.AutoBraceConfiguration = .enabled
 
   /// Hook to propagate message sets upwards in the view hierarchy.
   ///
@@ -499,10 +509,11 @@ final class CodeView: NSTextView {
 
   /// Designated initialiser for code views with a gutter.
   ///
-  init(frame: CGRect, 
+  init(frame: CGRect,
        with language: LanguageConfiguration,
        viewLayout: CodeEditor.LayoutConfiguration,
        indentation: CodeEditor.IndentationConfiguration,
+       autoBrace: CodeEditor.AutoBraceConfiguration = .enabled,
        theme: Theme,
        setText: @escaping (String) -> Void,
        setMessages: @escaping (Set<TextLocated<Message>>) -> Void)
@@ -512,6 +523,7 @@ final class CodeView: NSTextView {
     self.language    = language
     self.viewLayout  = viewLayout
     self.indentation = indentation
+    self.autoBrace   = autoBrace
     self.setMessages = setMessages
 
     // Use custom components that are gutter-aware and support code-specific editing actions and highlighting.

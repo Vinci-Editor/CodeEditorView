@@ -544,4 +544,102 @@ extension LanguageConfiguration {
            , .tokenisingComment: commentTokens
            ]
   }
+
+  // MARK: - Reindentation
+
+  /// Reindents the given string based on the language's scoping rules.
+  ///
+  /// - Parameters:
+  ///   - string: The string to reindent.
+  ///   - indentWidth: The number of spaces per indentation level.
+  ///   - useTabs: If `true`, use tabs for indentation; otherwise use spaces.
+  ///   - tabWidth: The visual width of a tab character (used when `useTabs` is true).
+  /// - Returns: The reindented string.
+  ///
+  public func reindent(_ string: String, indentWidth: Int = 2, useTabs: Bool = false, tabWidth: Int = 2) -> String {
+    let lines = string.components(separatedBy: .newlines)
+    var result: [String] = []
+    var bracketDepth = 0
+
+    // Tokenize the entire string to get bracket information
+    guard let tokeniser = Tokeniser(for: tokenDictionary,
+                                    caseInsensitiveReservedIdentifiers: caseInsensitiveReservedIdentifiers)
+    else {
+      // If tokeniser creation fails, return original string
+      return string
+    }
+
+    let tokens = string.tokenise(with: tokeniser, state: State.tokenisingCode)
+
+    // Build a map of line -> tokens on that line
+    var lineTokens: [[Tokeniser.Token]] = Array(repeating: [], count: lines.count)
+    var currentIndex = 0
+    for (lineIndex, line) in lines.enumerated() {
+      let lineStart = currentIndex
+      let lineEnd = lineStart + line.utf16.count
+
+      for token in tokens {
+        if token.range.location >= lineStart && token.range.location < lineEnd {
+          lineTokens[lineIndex].append(token)
+        }
+      }
+
+      currentIndex = lineEnd + 1  // +1 for newline character
+    }
+
+    for (lineIndex, line) in lines.enumerated() {
+      let trimmedLine = line.drop(while: { $0 == " " || $0 == "\t" })
+
+      // Calculate depth at start of this line (before any brackets on this line)
+      let depthAtLineStart = bracketDepth
+
+      // Count brackets on this line to update depth for next line
+      let tokensOnLine = lineTokens[lineIndex]
+      var lineOpenBrackets = 0
+      var lineCloseBrackets = 0
+
+      for token in tokensOnLine {
+        if token.token == Token.curlyBracketOpen {
+          lineOpenBrackets += 1
+        } else if token.token == Token.curlyBracketClose {
+          lineCloseBrackets += 1
+        }
+      }
+
+      // For indentation-sensitive languages (like Python), inherit from previous non-empty line
+      let effectiveDepth: Int
+      if indentationSensitiveScoping {
+        // For indentation-sensitive languages, preserve relative indentation
+        // Just strip existing indent and reapply based on content
+        effectiveDepth = depthAtLineStart
+      } else {
+        // For bracket-based languages, if line starts with closing bracket, dedent first
+        let startsWithCloseBracket = trimmedLine.first == "}"
+        effectiveDepth = startsWithCloseBracket ? max(0, depthAtLineStart - 1) : depthAtLineStart
+      }
+
+      // Generate indentation string
+      let indentString: String
+      if useTabs {
+        let numTabs = (effectiveDepth * indentWidth) / tabWidth
+        let extraSpaces = (effectiveDepth * indentWidth) % tabWidth
+        indentString = String(repeating: "\t", count: numTabs) + String(repeating: " ", count: extraSpaces)
+      } else {
+        indentString = String(repeating: " ", count: effectiveDepth * indentWidth)
+      }
+
+      // Add reindented line (preserve empty lines without adding indentation)
+      if trimmedLine.isEmpty {
+        result.append("")
+      } else {
+        result.append(indentString + trimmedLine)
+      }
+
+      // Update bracket depth for next line
+      bracketDepth += lineOpenBrackets - lineCloseBrackets
+      bracketDepth = max(0, bracketDepth)
+    }
+
+    return result.joined(separator: "\n")
+  }
 }
