@@ -784,6 +784,18 @@ extension CodeView {
       return false
     }
 
+    /// Check if the document's curly braces are already balanced.
+    /// If balanced, we shouldn't add another closing brace.
+    ///
+    func documentBracesAreBalanced() -> Bool {
+      let lastLineIndex = codeStorageDelegate.lineMap.lines.count - 1
+      guard lastLineIndex >= 0,
+            let lastLineInfo = codeStorageDelegate.lineMap.lookup(line: lastLineIndex)?.info
+      else { return false }
+      // If depth at end of document is 0, all braces are matched
+      return lastLineInfo.curlyBracketDepthEnd == 0
+    }
+
     textContentStorage.performEditingTransaction {
       processSelectedRanges { range in
 
@@ -793,25 +805,27 @@ extension CodeView {
         // Check if we're pressing enter right after a `{` and auto-brace is enabled
         if autoBrace.completeOnEnter && isAfterOpeningCurlyBrace(at: range.location) {
           // Use the current line's indentation as base, then add one indent level for the cursor
-          let baseIndent       = baseIndentation(at: range.location)
-          let innerIndent      = baseIndent + indentation.indentWidth
-          let baseIndentString = indentation.indentation(for: baseIndent)
+          let baseIndent        = baseIndentation(at: range.location)
+          let innerIndent       = baseIndent + indentation.indentWidth
+          let baseIndentString  = indentation.indentation(for: baseIndent)
           let innerIndentString = indentation.indentation(for: innerIndent)
 
           // Check if there's already a closing brace right after the cursor (from auto-completion)
           if hasClosingCurlyBraceAfter(at: range.location) {
-            // There's already a `}` after cursor — just add newlines and move the brace to proper position
-            // Delete the existing `}` and re-insert it on a new line with proper indentation
-            let closingBrace = language.lexeme(of: .curlyBracketClose) ?? "}"
-            let deleteRange  = NSRange(location: range.location, length: closingBrace.count)
-            let insertText   = "\n" + innerIndentString + "\n" + baseIndentString + closingBrace
-            codeStorage.replaceCharacters(in: deleteRange, with: insertText)
+            // There's already a `}` right after cursor — insert newlines before it
+            // The `}` will naturally be pushed down and we add base indentation before it
+            let insertText = "\n" + innerIndentString + "\n" + baseIndentString
+            codeStorage.replaceCharacters(in: range, with: insertText)
             return NSRange(location: range.location + 1 + innerIndentString.count, length: 0)
-          } else {
-            // No existing closing brace — insert newlines and add the closing brace
+          } else if !documentBracesAreBalanced() {
+            // Document has unmatched `{` — insert closing brace
             let closingBrace = language.lexeme(of: .curlyBracketClose) ?? "}"
             let insertText   = "\n" + innerIndentString + "\n" + baseIndentString + closingBrace
             codeStorage.replaceCharacters(in: range, with: insertText)
+            return NSRange(location: range.location + 1 + innerIndentString.count, length: 0)
+          } else {
+            // Document braces are balanced — just insert newline with indentation
+            codeStorage.replaceCharacters(in: range, with: "\n" + innerIndentString)
             return NSRange(location: range.location + 1 + innerIndentString.count, length: 0)
           }
         } else {
