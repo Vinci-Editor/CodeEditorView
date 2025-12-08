@@ -56,6 +56,18 @@ enum CommentStyle {
 ///
 struct LineInfo {
 
+  /// Tokenization state for viewport-based highlighting.
+  ///
+  enum TokenizationState {
+    case pending           // Line has not been tokenized yet
+    case tokenized         // Line has been fully tokenized
+    case invalidated       // Line was tokenized but needs re-tokenization due to edits
+  }
+
+  /// Current tokenization state of this line.
+  ///
+  var tokenizationState: TokenizationState = .tokenized
+
   /// Structure characterising a bundle of messages reported for a single line. It features a stable identity to be able
   /// to associate display information in separate structures. Messages are paired with the zero-based column index to
   /// which they refer.
@@ -152,6 +164,7 @@ class CodeStorageDelegate: NSObject, NSTextStorageDelegate {
 
   private(set) var language:  LanguageConfiguration
   private      var tokeniser: LanguageConfiguration.Tokeniser?  // cache the tokeniser
+  private      var treeSitterTokenizer: TreeSitterTokenizer?    // tree-sitter based tokenizer
 
   /// Language service for this document if available.
   ///
@@ -208,6 +221,19 @@ class CodeStorageDelegate: NSObject, NSTextStorageDelegate {
     self.tokeniser = Tokeniser(for: language.tokenDictionary,
                                caseInsensitiveReservedIdentifiers: language.caseInsensitiveReservedIdentifiers)
     self.setText   = setText
+
+    // Initialize tree-sitter tokenizer if available and preferred
+    if language.preferTreeSitter,
+       let languageFactory = language.treeSitterLanguage,
+       let query = language.treeSitterHighlightQuery,
+       let mapping = language.treeSitterCaptureMapping {
+      self.treeSitterTokenizer = try? TreeSitterTokenizer(
+        language: languageFactory(),
+        highlightQuerySource: query,
+        captureMapping: mapping
+      )
+    }
+
     super.init()
   }
 
@@ -215,6 +241,42 @@ class CodeStorageDelegate: NSObject, NSTextStorageDelegate {
     Task { [languageService] in
       try await languageService?.stop()
     }
+  }
+
+
+  // MARK: Tokenization State Management
+
+  /// Update the tokenization state for a specific line.
+  ///
+  func setTokenizationState(_ state: LineInfo.TokenizationState, for line: Int) {
+    guard line < lineMap.lines.count else { return }
+    lineMap.lines[line].info?.tokenizationState = state
+  }
+
+  /// Update the tokenization state for a range of lines.
+  ///
+  func setTokenizationState(_ state: LineInfo.TokenizationState, for lines: Range<Int>) {
+    for line in lines where line < lineMap.lines.count {
+      lineMap.lines[line].info?.tokenizationState = state
+    }
+  }
+
+  /// Check if a line is tokenized.
+  ///
+  func isLineTokenized(_ line: Int) -> Bool {
+    guard line < lineMap.lines.count else { return false }
+    return lineMap.lines[line].info?.tokenizationState == .tokenized
+  }
+
+  /// Check if all lines in a range are tokenized.
+  ///
+  func areLinesTokenized(in range: Range<Int>) -> Bool {
+    for line in range where line < lineMap.lines.count {
+      if lineMap.lines[line].info?.tokenizationState != .tokenized {
+        return false
+      }
+    }
+    return true
   }
 
 
@@ -239,6 +301,21 @@ class CodeStorageDelegate: NSObject, NSTextStorageDelegate {
 
       self.tokeniser = Tokeniser(for: language.tokenDictionary,
                                  caseInsensitiveReservedIdentifiers: language.caseInsensitiveReservedIdentifiers)
+
+      // Reinitialize tree-sitter tokenizer if available and preferred
+      if language.preferTreeSitter,
+         let languageFactory = language.treeSitterLanguage,
+         let query = language.treeSitterHighlightQuery,
+         let mapping = language.treeSitterCaptureMapping {
+        self.treeSitterTokenizer = try? TreeSitterTokenizer(
+          language: languageFactory(),
+          highlightQuerySource: query,
+          captureMapping: mapping
+        )
+      } else {
+        self.treeSitterTokenizer = nil
+      }
+
       let _ = tokenise(range: NSRange(location: 0, length: codeStorage.length), in: codeStorage)
 
     }

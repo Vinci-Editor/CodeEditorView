@@ -397,13 +397,70 @@ extension CodeStorage {
   /// - Parameters:
   ///   - range: The range whose tokens are being enumerated. The first and last token may extend left and right
   ///       outside the given range.
-  ///   - block: A block invoked foro every range.
+  ///   - block: A block invoked for every token in the range.
+  ///
+  /// This version is optimized to only iterate through lines that intersect the given range.
   ///
   func enumerateTokens(in range: NSRange, using block: (LineToken) -> Void) {
-    enumerateTokens(from: range.location) { token in
+    guard let lineMap = (delegate as? CodeStorageDelegate)?.lineMap,
+          let startLine = lineMap.lineContaining(index: range.location),
+          let endLine = lineMap.lineContaining(index: max(0, range.max - 1))
+    else { return }
 
-      block(token)
-      return token.range.max < range.max
+    // Enumerate the comment ranges and tokens on one line
+    func enumerate(tokens: [LanguageConfiguration.Tokeniser.Token],
+                   commentRanges: [NSRange],
+                   lineStart: Int,
+                   skipBefore: Int?,
+                   stopAfter: Int)
+    {
+      var skipUntil: Int? = skipBefore  // tokens from this location onwards (even in part) are enumerated
+
+      var tokens        = tokens
+      var commentRanges = commentRanges
+      while !tokens.isEmpty || !commentRanges.isEmpty {
+
+        let token        = tokens.first,
+            commentRange = commentRanges.first
+        if let token,
+           (commentRange?.location ?? Int.max) > token.range.location
+        {
+          // Token at this position is in the range
+          if let range = token.range.shifted(by: lineStart) {
+            let tokenEnd = lineStart + token.range.max
+            if (skipUntil ?? 0) <= token.range.max - 1 {
+              block(LineToken(range: range, column: token.range.location, kind: .token(token.token)))
+            }
+            if tokenEnd >= stopAfter { return }
+          }
+          tokens.removeFirst()
+
+        } else if let commentRange {
+          if let range = commentRange.shifted(by: lineStart) {
+            let commentEnd = lineStart + commentRange.max
+            if (skipUntil ?? 0) <= commentRange.max - 1 {
+              block(LineToken(range: range, column: commentRange.location, kind: .comment))
+              skipUntil = commentRange.max      // skip tokens within the comment range
+            }
+            if commentEnd >= stopAfter { return }
+          }
+          commentRanges.removeFirst()
+        }
+      }
+    }
+
+    // Iterate only through lines that intersect the range
+    for lineIndex in startLine...endLine {
+      guard lineIndex < lineMap.lines.count else { break }
+      let line = lineMap.lines[lineIndex]
+      if let info = line.info {
+        let skipBefore: Int? = (lineIndex == startLine) ? (range.location - line.range.location) : nil
+        enumerate(tokens: info.tokens,
+                  commentRanges: info.commentRanges,
+                  lineStart: line.range.location,
+                  skipBefore: skipBefore,
+                  stopAfter: range.max)
+      }
     }
   }
   

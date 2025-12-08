@@ -75,6 +75,10 @@ final class CodeView: UITextView {
   // Notification observer
   private var textDidChangeObserver: NSObjectProtocol?
 
+  /// Coordinator for viewport-based tokenization.
+  ///
+  private let tokenizationCoordinator = TokenizationCoordinator()
+
   /// Contains the line on which the insertion point was located, the last time the selection range got set (if the
   /// selection was an insertion point at all; i.e., it's length was 0).
   ///
@@ -139,6 +143,21 @@ final class CodeView: UITextView {
   /// Keeps track of the set of message views.
   ///
   var messageViews: MessageViews = [:]
+
+  /// Cached document height for the main code view (invalidated on text change).
+  ///
+  private var cachedCodeHeight: CGFloat?
+
+  /// Cached document height for the minimap (invalidated on text change).
+  ///
+  private var cachedMinimapHeight: CGFloat?
+
+  /// Invalidate cached document heights when content changes.
+  ///
+  func invalidateDocumentHeightCache() {
+    cachedCodeHeight = nil
+    cachedMinimapHeight = nil
+  }
 
   /// Designated initializer for code views with a gutter.
   ///
@@ -211,9 +230,13 @@ final class CodeView: UITextView {
     // Add a text storage delegate that maintains a line map
     codeStorage.delegate = codeStorageDelegate
 
+    // Initialize the tokenization coordinator
+    tokenizationCoordinator.codeStorageDelegate = codeStorageDelegate
+    tokenizationCoordinator.textStorage = codeStorage
+
     // Add a gutter view
     let gutterView  = GutterView(frame: .zero,
-                                 textView: self, 
+                                 textView: self,
                                  codeStorage: codeStorage,
                                  theme: theme,
                                  getMessageViews: { [weak self] in self?.messageViews ?? [:] },
@@ -276,10 +299,11 @@ final class CodeView: UITextView {
     // We need to check whether we need to look up completions or cancel a running completion process after every text
     // change.  We also need to invalidate the views of all in the meantime invalidated message views.
     textDidChangeObserver
-      = NotificationCenter.default.addObserver(forName: UITextView.textDidChangeNotification, 
+      = NotificationCenter.default.addObserver(forName: UITextView.textDidChangeNotification,
                                                object: self,
                                                queue: .main){ [weak self] _ in
 
+        self?.invalidateDocumentHeightCache()
         self?.invalidateMessageViews(withIDs: self!.codeStorageDelegate.lastInvalidatedMessageIDs)
         self?.gutterView?.invalidateGutter()
         self?.minimapGutterView?.invalidateGutter()
@@ -397,6 +421,10 @@ final class CodeView: NSTextView {
   private var didChangeNotificationObserver:          NSObjectProtocol?
   private var didChangeSelectionNotificationObserver: NSObjectProtocol?
 
+  /// Coordinator for viewport-based tokenization.
+  ///
+  private let tokenizationCoordinator = TokenizationCoordinator()
+
   /// Contains the line on which the insertion point was located, the last time the selection range got set (if the
   /// selection was an insertion point at all; i.e., it's length was 0).
   ///
@@ -472,6 +500,21 @@ final class CodeView: NSTextView {
   /// Keeps track of the set of message views.
   ///
   var messageViews: MessageViews = [:]
+
+  /// Cached document height for the main code view (invalidated on text change).
+  ///
+  private var cachedCodeHeight: CGFloat?
+
+  /// Cached document height for the minimap (invalidated on text change).
+  ///
+  private var cachedMinimapHeight: CGFloat?
+
+  /// Invalidate cached document heights when content changes.
+  ///
+  func invalidateDocumentHeightCache() {
+    cachedCodeHeight = nil
+    cachedMinimapHeight = nil
+  }
 
   /// For the consumption of the diagnostics stream.
   ///
@@ -582,6 +625,10 @@ final class CodeView: NSTextView {
     // Add a text storage delegate that maintains a line map
     codeStorage.delegate = codeStorageDelegate
 
+    // Initialize the tokenization coordinator
+    tokenizationCoordinator.codeStorageDelegate = codeStorageDelegate
+    tokenizationCoordinator.textStorage = codeStorage
+
     // Create the main gutter view
     let gutterView = GutterView(frame: CGRect.zero,
                                 textView: self,
@@ -683,6 +730,7 @@ final class CodeView: NSTextView {
                                                queue: .main) { [weak self] _ in
 
 //        self?.infoPopover?.close()
+        self?.invalidateDocumentHeightCache()
         self?.considerCompletionFor(range: self!.rangeForUserCompletion)
         self?.invalidateMessageViews(withIDs: self!.codeStorageDelegate.lastInvalidatedMessageIDs)
       }
@@ -1135,20 +1183,39 @@ extension CodeView {
   ///
   func adjustScrollPositionOfMinimap() {
     guard viewLayout.showMinimap,
-          let minimapTextLayoutManager = minimapView?.textLayoutManager
+          let minimapTextLayoutManager = minimapView?.textLayoutManager,
+          let mainTextLayoutManager = optTextLayoutManager
     else { return }
 
-    textLayoutManager?.ensureLayout(for: textLayoutManager!.documentRange)
-    minimapTextLayoutManager.ensureLayout(for: minimapTextLayoutManager.documentRange)
+    // Use cached heights if available, otherwise compute and cache them.
+    // This avoids expensive ensureLayout(for: documentRange) calls on every scroll.
+    let codeHeight: CGFloat
+    let minimapHeight: CGFloat
 
-    // NB: We don't use `minimapView?.contentSize.height`, because it is too large if the code doesn't fill the whole
-    //     visible portion of the minimap view. Moreover, even for the code view, `contentSize` may not yet have been
-    //     adjusted, whereas we know that the layout is complete (as we ensure that above).
-    guard let codeHeight
-                = optTextLayoutManager?.textLayoutFragmentExtent(for: optTextLayoutManager!.documentRange)?.height,
-          let minimapHeight
-                = minimapTextLayoutManager.textLayoutFragmentExtent(for: minimapTextLayoutManager.documentRange)?.height
-    else { return }
+    if let cached = cachedCodeHeight {
+      codeHeight = cached
+    } else {
+      // Only ensure layout for viewport to get an accurate height estimate
+      mainTextLayoutManager.ensureLayout(for: mainTextLayoutManager.textViewportLayoutController.viewportBounds)
+      if let height = mainTextLayoutManager.textLayoutFragmentExtent(for: mainTextLayoutManager.documentRange)?.height {
+        cachedCodeHeight = height
+        codeHeight = height
+      } else {
+        return
+      }
+    }
+
+    if let cached = cachedMinimapHeight {
+      minimapHeight = cached
+    } else {
+      minimapTextLayoutManager.ensureLayout(for: minimapTextLayoutManager.textViewportLayoutController.viewportBounds)
+      if let height = minimapTextLayoutManager.textLayoutFragmentExtent(for: minimapTextLayoutManager.documentRange)?.height {
+        cachedMinimapHeight = height
+        minimapHeight = height
+      } else {
+        return
+      }
+    }
 
     let visibleHeight = documentVisibleRect.size.height
 

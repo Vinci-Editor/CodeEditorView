@@ -22,12 +22,16 @@ let package = Package(
     .package(
       url: "https://github.com/ChimeHQ/Rearrange.git",
       .upToNextMajor(from: "1.6.0")),
+    .package(
+      url: "https://github.com/ChimeHQ/SwiftTreeSitter.git",
+      from: "0.8.0"),
   ],
   targets: [
     .target(
       name: "LanguageSupport",
       dependencies: [
         "Rearrange",
+        "SwiftTreeSitter",
       ],
       swiftSettings: [
         .enableUpcomingFeature("BareSlashRegexLiterals")
