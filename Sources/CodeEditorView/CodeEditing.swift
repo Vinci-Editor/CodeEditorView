@@ -151,9 +151,14 @@ extension CodeView {
 
 #elseif os(iOS) || os(visionOS)
 
-  override var keyCommands: [UIKeyCommand] {
-    [ UIKeyCommand(input: "\t", modifierFlags: [], action: #selector(insertTab))
+  override var keyCommands: [UIKeyCommand]? {
+    [ UIKeyCommand(input: "\t", modifierFlags: [], action: #selector(insertTab)),
+      UIKeyCommand(input: "\r", modifierFlags: [], action: #selector(insertReturnCommand))
     ]
+  }
+
+  @objc func insertReturnCommand() {
+    insertReturn()
   }
 
 #endif
@@ -740,14 +745,96 @@ extension CodeView {
       }
     }
 
+    /// Check if the cursor is immediately after an opening curly brace.
+    ///
+    func isAfterOpeningCurlyBrace(at index: Int) -> Bool {
+      guard index > 0 else { return false }
+      if let token = codeStorage.tokenOnly(at: index - 1),
+         token.token == .curlyBracketOpen,
+         token.range.upperBound == index
+      {
+        return true
+      }
+      return false
+    }
+
+    /// Get the base indentation of the line containing the given index.
+    ///
+    func baseIndentation(at index: Int) -> Int {
+      guard let line     = codeStorageDelegate.lineMap.lineOf(index: index),
+            let lineInfo = codeStorageDelegate.lineMap.lookup(line: line)
+      else { return 0 }
+
+      let lineRange = lineInfo.range
+      guard let stringRange = Range<String.Index>(lineRange, in: codeStorage.string) else { return 0 }
+      let lineString = codeStorage.string[stringRange]
+      return indentation.currentIndentation(in: lineString)
+    }
+
+    /// Check if there's a closing curly brace immediately after the cursor position.
+    ///
+    func hasClosingCurlyBraceAfter(at index: Int) -> Bool {
+      guard index < codeStorage.length else { return false }
+      if let token = codeStorage.tokenOnly(at: index),
+         token.token == .curlyBracketClose,
+         token.range.lowerBound == index
+      {
+        return true
+      }
+      return false
+    }
+
+    /// Check if the document has unmatched opening braces by scanning the entire text.
+    /// If there are more `{` than `}`, the document is unbalanced and we should add a `}`.
+    ///
+    func documentHasUnmatchedOpenBrace() -> Bool {
+      var depth = 0
+      for char in codeStorage.string {
+        if char == "{" {
+          depth += 1
+        } else if char == "}" {
+          depth -= 1
+        }
+      }
+      return depth > 0
+    }
+
     textContentStorage.performEditingTransaction {
       processSelectedRanges { range in
 
         let desiredIndent = if indentation.indentOnReturn { predictedIndentation(after: range.location) } else { 0 },
             indentString  = indentation.indentation(for: desiredIndent)
-        codeStorage.replaceCharacters(in: range, with: "\n" + indentString)
-        return NSRange(location: range.location + 1 + indentString.count, length: 0)
 
+        // Check if we're pressing enter right after a `{` and auto-brace is enabled
+        if autoBrace.completeOnEnter && isAfterOpeningCurlyBrace(at: range.location) {
+          // Use the current line's indentation as base, then add one indent level for the cursor
+          let baseIndent        = baseIndentation(at: range.location)
+          let innerIndent       = baseIndent + indentation.indentWidth
+          let baseIndentString  = indentation.indentation(for: baseIndent)
+          let innerIndentString = indentation.indentation(for: innerIndent)
+
+          // Check if there's already a closing brace right after the cursor (from auto-completion)
+          if hasClosingCurlyBraceAfter(at: range.location) {
+            // There's already a `}` right after cursor — just insert newlines before it
+            // The `}` will naturally be pushed down and we add base indentation before it
+            let insertText = "\n" + innerIndentString + "\n" + baseIndentString
+            codeStorage.replaceCharacters(in: range, with: insertText)
+            return NSRange(location: range.location + 1 + innerIndentString.count, length: 0)
+          } else if documentHasUnmatchedOpenBrace() {
+            // Document has more `{` than `}` — add a closing brace
+            let closingBrace = language.lexeme(of: .curlyBracketClose) ?? "}"
+            let insertText   = "\n" + innerIndentString + "\n" + baseIndentString + closingBrace
+            codeStorage.replaceCharacters(in: range, with: insertText)
+            return NSRange(location: range.location + 1 + innerIndentString.count, length: 0)
+          } else {
+            // Document braces are balanced — just insert newline with indentation
+            codeStorage.replaceCharacters(in: range, with: "\n" + innerIndentString)
+            return NSRange(location: range.location + 1 + innerIndentString.count, length: 0)
+          }
+        } else {
+          codeStorage.replaceCharacters(in: range, with: "\n" + indentString)
+          return NSRange(location: range.location + 1 + indentString.count, length: 0)
+        }
       }
     }
   }
@@ -778,5 +865,29 @@ extension CodeView {
 #elseif os(iOS) || os(visionOS)
     if let selection = newSelected.first { selectedRange = selection }
 #endif
+  }
+}
+
+
+// MARK: -
+// MARK: Standalone reindentation helper
+
+extension LanguageConfiguration {
+
+  /// Reindents the given string using the specified indentation configuration.
+  ///
+  /// - Parameters:
+  ///   - string: The string to reindent.
+  ///   - configuration: The indentation configuration to use.
+  /// - Returns: The reindented string.
+  ///
+  /// This is a convenience wrapper around `reindent(_:indentWidth:useTabs:tabWidth:)` that uses
+  /// `CodeEditor.IndentationConfiguration`.
+  ///
+  public func reindent(_ string: String, using configuration: CodeEditor.IndentationConfiguration) -> String {
+    reindent(string,
+             indentWidth: configuration.indentWidth,
+             useTabs: configuration.preference == .preferTabs,
+             tabWidth: configuration.tabWidth)
   }
 }
