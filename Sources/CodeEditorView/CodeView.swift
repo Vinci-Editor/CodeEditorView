@@ -310,10 +310,38 @@ final class CodeView: UITextView {
                                                queue: .main){ [weak self] _ in
 
         self?.invalidateDocumentHeightCache()
+        self?.computeDocumentHeightsAsync()
         self?.invalidateMessageViews(withIDs: self!.codeStorageDelegate.lastInvalidatedMessageIDs)
         self?.gutterView?.invalidateGutter()
         self?.minimapGutterView?.invalidateGutter()
       }
+  }
+
+  /// Asynchronously compute and cache document heights after text changes.
+  /// This avoids blocking scrolling while still providing accurate heights.
+  ///
+  private func computeDocumentHeightsAsync() {
+    Task { @MainActor [weak self] in
+      guard let self = self,
+            let mainTextLayoutManager = self.optTextLayoutManager,
+            let minimapTextLayoutManager = self.minimapView?.textLayoutManager
+      else { return }
+
+      // Yield to let other UI work complete first
+      await Task.yield()
+
+      // Compute main code height
+      mainTextLayoutManager.ensureLayout(for: mainTextLayoutManager.documentRange)
+      if let height = mainTextLayoutManager.textLayoutFragmentExtent(for: mainTextLayoutManager.documentRange)?.height {
+        self.cachedCodeHeight = height
+      }
+
+      // Compute minimap height
+      minimapTextLayoutManager.ensureLayout(for: minimapTextLayoutManager.documentRange)
+      if let height = minimapTextLayoutManager.textLayoutFragmentExtent(for: minimapTextLayoutManager.documentRange)?.height {
+        self.cachedMinimapHeight = height
+      }
+    }
   }
 
   @available(*, unavailable)
@@ -524,6 +552,33 @@ final class CodeView: NSTextView {
   func invalidateDocumentHeightCache() {
     cachedCodeHeight = nil
     cachedMinimapHeight = nil
+  }
+
+  /// Asynchronously compute and cache document heights after text changes.
+  /// This avoids blocking scrolling while still providing accurate heights.
+  ///
+  private func computeDocumentHeightsAsync() {
+    Task { @MainActor [weak self] in
+      guard let self = self,
+            let mainTextLayoutManager = self.optTextLayoutManager,
+            let minimapTextLayoutManager = self.minimapView?.textLayoutManager
+      else { return }
+
+      // Yield to let other UI work complete first
+      await Task.yield()
+
+      // Compute main code height
+      mainTextLayoutManager.ensureLayout(for: mainTextLayoutManager.documentRange)
+      if let height = mainTextLayoutManager.textLayoutFragmentExtent(for: mainTextLayoutManager.documentRange)?.height {
+        self.cachedCodeHeight = height
+      }
+
+      // Compute minimap height
+      minimapTextLayoutManager.ensureLayout(for: minimapTextLayoutManager.documentRange)
+      if let height = minimapTextLayoutManager.textLayoutFragmentExtent(for: minimapTextLayoutManager.documentRange)?.height {
+        self.cachedMinimapHeight = height
+      }
+    }
   }
 
   /// For the consumption of the diagnostics stream.
@@ -743,6 +798,7 @@ final class CodeView: NSTextView {
 
 //        self?.infoPopover?.close()
         self?.invalidateDocumentHeightCache()
+        self?.computeDocumentHeightsAsync()
         self?.considerCompletionFor(range: self!.rangeForUserCompletion)
         self?.invalidateMessageViews(withIDs: self!.codeStorageDelegate.lastInvalidatedMessageIDs)
       }
@@ -1195,38 +1251,33 @@ extension CodeView {
   ///
   func adjustScrollPositionOfMinimap() {
     guard viewLayout.showMinimap,
-          let minimapTextLayoutManager = minimapView?.textLayoutManager,
-          let mainTextLayoutManager = optTextLayoutManager
+          minimapView?.textLayoutManager != nil,
+          optTextLayoutManager != nil
     else { return }
 
-    // Use cached heights if available, otherwise compute and cache them.
-    // This avoids expensive ensureLayout(for: documentRange) calls on every scroll.
+    // Use cached heights to avoid expensive layout calls on every scroll.
+    // Heights are computed once when text changes and cached.
     let codeHeight: CGFloat
     let minimapHeight: CGFloat
 
     if let cached = cachedCodeHeight {
       codeHeight = cached
     } else {
-      // Only ensure layout for viewport to get an accurate height estimate
-      mainTextLayoutManager.ensureLayout(for: mainTextLayoutManager.textViewportLayoutController.viewportBounds)
-      if let height = mainTextLayoutManager.textLayoutFragmentExtent(for: mainTextLayoutManager.documentRange)?.height {
-        cachedCodeHeight = height
-        codeHeight = height
-      } else {
-        return
-      }
+      // Estimate height based on line count - avoid forcing layout
+      let lineCount = CGFloat(codeStorageDelegate.lineMap.lines.count)
+      let estimatedLineHeight: CGFloat = 14.0  // Reasonable default
+      codeHeight = max(lineCount * estimatedLineHeight, documentVisibleRect.height)
+      cachedCodeHeight = codeHeight
     }
 
     if let cached = cachedMinimapHeight {
       minimapHeight = cached
     } else {
-      minimapTextLayoutManager.ensureLayout(for: minimapTextLayoutManager.textViewportLayoutController.viewportBounds)
-      if let height = minimapTextLayoutManager.textLayoutFragmentExtent(for: minimapTextLayoutManager.documentRange)?.height {
-        cachedMinimapHeight = height
-        minimapHeight = height
-      } else {
-        return
-      }
+      // Minimap uses same line count but scaled
+      let lineCount = CGFloat(codeStorageDelegate.lineMap.lines.count)
+      let estimatedLineHeight: CGFloat = 2.0  // Minimap lines are much smaller
+      minimapHeight = max(lineCount * estimatedLineHeight, documentVisibleRect.height)
+      cachedMinimapHeight = minimapHeight
     }
 
     let visibleHeight = documentVisibleRect.size.height
