@@ -156,6 +156,14 @@ final class CodeView: UITextView {
   ///
   private var cachedMinimapHeight: CGFloat?
 
+  /// Last time the minimap position was updated (for throttling during scroll).
+  ///
+  private var lastMinimapUpdateTime: CFAbsoluteTime = 0
+
+  /// Minimum interval between minimap position updates during scroll (in seconds).
+  ///
+  private let minimapUpdateThrottleInterval: CFAbsoluteTime = 0.016  // ~60fps
+
   /// Invalidate cached document heights when content changes.
   ///
   func invalidateDocumentHeightCache() {
@@ -525,6 +533,14 @@ final class CodeView: NSTextView {
   /// Cached document height for the minimap (invalidated on text change).
   ///
   private var cachedMinimapHeight: CGFloat?
+
+  /// Last time the minimap position was updated (for throttling during scroll).
+  ///
+  private var lastMinimapUpdateTime: CFAbsoluteTime = 0
+
+  /// Minimum interval between minimap position updates during scroll (in seconds).
+  ///
+  private let minimapUpdateThrottleInterval: CFAbsoluteTime = 0.016  // ~60fps
 
   /// Invalidate cached document heights when content changes.
   ///
@@ -1250,6 +1266,11 @@ extension CodeView {
           minimapView?.textLayoutManager != nil,
           optTextLayoutManager != nil
     else { return }
+
+    // Throttle minimap updates during rapid scrolling to avoid expensive frame updates
+    let now = CFAbsoluteTimeGetCurrent()
+    guard now - lastMinimapUpdateTime >= minimapUpdateThrottleInterval else { return }
+    lastMinimapUpdateTime = now
 
     // Use cached heights from performFullDocumentLayout().
     // If cache is not yet populated, skip minimap positioning.

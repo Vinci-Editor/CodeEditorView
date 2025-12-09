@@ -213,6 +213,14 @@ class CodeStorageDelegate: NSObject, NSTextStorageDelegate {
   ///
   var tokenCompletionCharacters: Int = 0
 
+  /// Work item for debouncing setText calls to avoid copying entire text on every keystroke.
+  ///
+  private var pendingSetTextWorkItem: DispatchWorkItem?
+
+  /// Debounce interval for setText calls (100ms gives responsive feel while avoiding per-keystroke copies).
+  ///
+  private let setTextDebounceInterval: TimeInterval = 0.1
+
 
   // MARK: Initialisers
 
@@ -343,6 +351,9 @@ class CodeStorageDelegate: NSObject, NSTextStorageDelegate {
     // If only attributes change, the line map and syntax highlighting remains the same => nothing for us to do
     guard editedMask.contains(.editedCharacters) else { return }
 
+    // Cache the text storage string once to avoid multiple expensive copies during this edit pass
+    let cachedString = textStorage.string
+
     // FIXME: This (and the rest of visual debugging) needs to be rewritten to use rendering attributes.
     if visualDebugging {
       let wholeTextRange = NSRange(location: 0, length: textStorage.length)
@@ -361,7 +372,7 @@ class CodeStorageDelegate: NSObject, NSTextStorageDelegate {
       }
     }
 
-    lineMap.updateAfterEditing(string: textStorage.string, range: editedRange, changeInLength: delta)
+    lineMap.updateAfterEditing(string: cachedString, range: editedRange, changeInLength: delta)
 
     // Check if this is a large document initial load - defer tokenization to viewport-based approach
     let isLargeInitialLoad = editedRange == NSRange(location: 0, length: textStorage.length)
@@ -393,8 +404,8 @@ class CodeStorageDelegate: NSObject, NSTextStorageDelegate {
       if tokenCompletionCharacters > 0 {
 
         // Update line map with completion characters.
-        lineMap.updateAfterEditing(string: textStorage.string, range: NSRange(location: editedRange.location + 1,
-                                                                              length: tokenCompletionCharacters),
+        lineMap.updateAfterEditing(string: cachedString, range: NSRange(location: editedRange.location + 1,
+                                                                        length: tokenCompletionCharacters),
                                    changeInLength: tokenCompletionCharacters)
 
         // Adjust the editing range and delta
@@ -432,21 +443,22 @@ class CodeStorageDelegate: NSObject, NSTextStorageDelegate {
     // binding, this check inside `CodeEditor.updateNSView(_:context:)` and `CodeEditor.updateUIView(_:context:)` will
     // suggest that the text storage needs to be overwritten by the contents of the binding, incorrectly removing any
     // entered composing characters (i.e., the marked text).
-    setText(textStorage.string)
+    setText(cachedString)
 
     // Notify language service (if attached)
-    notifyLanguageServiceOfChange(in: textStorage, range: editedRange, changeInLength: delta)
+    notifyLanguageServiceOfChange(in: textStorage, cachedString: cachedString, range: editedRange, changeInLength: delta)
   }
 
 
   // MARK: Language service notification
 
   private func notifyLanguageServiceOfChange(in textStorage: NSTextStorage,
+                                             cachedString: String,
                                              range editedRange: NSRange,
                                              changeInLength delta: Int) {
 
     // Notify language service (if attached)
-    let text         = (textStorage.string as NSString).substring(with: editedRange),
+    let text         = (cachedString as NSString).substring(with: editedRange),
         afterLine    = lineMap.lineOf(index: editedRange.max),
         lines        = lineMap.linesAffected(by: editedRange, changeInLength: delta),
         lineChange   = if let afterLine,
@@ -485,7 +497,7 @@ class CodeStorageDelegate: NSObject, NSTextStorageDelegate {
           else { return }
 
           try await languageService.stop()
-          try await languageService.openDocument(with: textStorage.string,
+          try await languageService.openDocument(with: cachedString,
                                                  locationService: self.lineMapLocationConverter)
         }
 
