@@ -191,9 +191,10 @@ class MinimapLineFragment: NSTextLineFragment {
 ///
 class MinimapLayoutFragment: NSTextLayoutFragment {
 
-  private var _textLineFragments: [NSTextLineFragment] = []
+  private var _textLineFragments: [NSTextLineFragment]?
 
-  private var observation: NSKeyValueObservation?
+  /// Cache to track which fragments we've already processed (by identity)
+  private var cachedFragmentIdentifiers: [ObjectIdentifier] = []
 
   override var layoutFragmentFrame: CGRect {
     CGRect(x: super.layoutFragmentFrame.minX,
@@ -204,20 +205,23 @@ class MinimapLayoutFragment: NSTextLayoutFragment {
 
   // NB: We don't override `renderingSurfaceBounds` as that is calculated on the basis of `layoutFragmentFrame`.
 
+  /// Lazily computed text line fragments - only processes when actually accessed for drawing.
+  /// This avoids expensive rendering attribute enumeration during scroll when fragments aren't visible.
   @objc override dynamic var textLineFragments: [NSTextLineFragment] {
-    return _textLineFragments
+    // Check if we need to recompute (fragments changed or first access)
+    let superFragments = super.textLineFragments
+    let currentIdentifiers = superFragments.map { ObjectIdentifier($0) }
+
+    if _textLineFragments == nil || currentIdentifiers != cachedFragmentIdentifiers {
+      updateTextLineFragments(from: superFragments)
+      cachedFragmentIdentifiers = currentIdentifiers
+    }
+    return _textLineFragments ?? []
   }
 
   override init(textElement: NSTextElement, range rangeInElement: NSTextRange?) {
     super.init(textElement: textElement, range: rangeInElement)
-    observation = super.observe(\.textLineFragments, options: [.new]){ [weak self] _, _ in
-
-      // NB: We cannot use `change.newValue` as this seems to pull the value from the subclass property (which we
-      //     want to update here). Instead, we need to directly access `super`. This is, however as per Swift 5.9
-      //     not possible in a closure weakly capturing `self` (which we need to do here to avoid a retain cycle).
-      //     Hence, we defer to an auxilliary method.
-      self?.updateTextLineFragments()
-    }
+    // No eager processing - fragments are computed lazily when accessed
   }
   
   typealias AttributeRun = (attributes: [NSAttributedString.Key : Any], range: NSRange)
@@ -226,74 +230,94 @@ class MinimapLayoutFragment: NSTextLayoutFragment {
   private let      invisibleCharacterers       = CharacterSet.whitespacesAndNewlines.union(CharacterSet.controlCharacters)
   private lazy var invertedInvisibleCharacters = invisibleCharacterers.inverted
 
-  /// Update the text line fragments from the corresponding property of `super`.
+  /// Update the text line fragments from the given super fragments.
   ///
-  private func updateTextLineFragments() {
-    if let textLayoutManager = self.textLayoutManager {
-
-      var location       = rangeInElement.location
+  private func updateTextLineFragments(from superFragments: [NSTextLineFragment]) {
+    guard let textLayoutManager = self.textLayoutManager else {
       _textLineFragments = []
-      for fragment in super.textLineFragments {
-        guard let string = (fragment.attributedString.string[fragment.characterRange].flatMap{ String($0) }) 
-        else { break }
+      return
+    }
 
-        let attributeRuns
-          = if let endLocation = textLayoutManager.location(location, offsetBy: fragment.characterRange.length),
-               let textRange   = NSTextRange(location: location, end: endLocation)
-          {
+    var location = rangeInElement.location
+    var newFragments: [NSTextLineFragment] = []
 
-            textLayoutManager.renderingAttributes(in: textRange).map { attributeRun in
-              (attributes: attributeRun.attributes,
-               range: NSRange(location: textLayoutManager.offset(from: location, to: attributeRun.textRange.location),
-                              length: textLayoutManager.offset(from: attributeRun.textRange.location, to: attributeRun.textRange.endLocation)))
-            }
-          } else { [AttributeRun]() }
+    for fragment in superFragments {
+      guard let string = (fragment.attributedString.string[fragment.characterRange].flatMap{ String($0) })
+      else { break }
 
-        var attributeRunsWithoutWhitespace: [AttributeRun] = []
-        for (attributes, range) in attributeRuns {
+      let attributeRuns
+        = if let endLocation = textLayoutManager.location(location, offsetBy: fragment.characterRange.length),
+             let textRange   = NSTextRange(location: location, end: endLocation)
+        {
 
-          if attributes[.hideInvisibles] == nil {
-            attributeRunsWithoutWhitespace.append((attributes: attributes, range: range))
-          } else {
-
-            var remainingRange = range
-            while remainingRange.length > 0,
-                  let match = string.rangeOfCharacter(from: invisibleCharacterers, range: remainingRange.range(in: string))
-            {
-
-              let lower = match.lowerBound.utf16Offset(in: string),
-                  upper = min(match.upperBound.utf16Offset(in: string), remainingRange.max)
-
-              // If we have got a prefix with visible characters, emit an attribute run covering those.
-              if lower > remainingRange.location {
-                attributeRunsWithoutWhitespace.append((attributes: attributes,
-                                                       range: NSRange(location: remainingRange.location,
-                                                                      length: lower - remainingRange.location)))
-              }
-
-              // Advance the remaining range to after the character found in `match`.
-              remainingRange = NSRange(location: upper,
-                                       length: remainingRange.length - (upper - remainingRange.location))
-
-              if let nextVisibleCharacter = string.rangeOfCharacter(from: invertedInvisibleCharacters,
-                                                                    range: remainingRange.range(in: string))
-              {
-
-                // If there is another visible character, the new remaining range starts with that character.
-                let lower = nextVisibleCharacter.lowerBound.utf16Offset(in: string)
-                remainingRange = NSRange(location: lower,
-                                         length: remainingRange.length - (lower - remainingRange.location))
-
-              } else {  // If there are no more visible characters, we are done.
-                remainingRange.length = 0
-              }
-            }
+          textLayoutManager.renderingAttributes(in: textRange).map { attributeRun in
+            (attributes: attributeRun.attributes,
+             range: NSRange(location: textLayoutManager.offset(from: location, to: attributeRun.textRange.location),
+                            length: textLayoutManager.offset(from: attributeRun.textRange.location, to: attributeRun.textRange.endLocation)))
           }
-        }
-        _textLineFragments.append(MinimapLineFragment(fragment, attributes: attributeRunsWithoutWhitespace))
-        location = textLayoutManager.location(location, offsetBy: fragment.characterRange.length) ?? location
+        } else { [AttributeRun]() }
+
+      let attributeRunsWithoutWhitespace = filterWhitespace(from: attributeRuns, in: string)
+      newFragments.append(MinimapLineFragment(fragment, attributes: attributeRunsWithoutWhitespace))
+      location = textLayoutManager.location(location, offsetBy: fragment.characterRange.length) ?? location
+    }
+
+    _textLineFragments = newFragments
+  }
+
+  /// Filter whitespace from attribute runs using a single-pass O(n) algorithm.
+  ///
+  /// - Parameters:
+  ///   - attributeRuns: The original attribute runs to filter.
+  ///   - string: The string content to scan for visible characters.
+  /// - Returns: Attribute runs with whitespace ranges excluded.
+  ///
+  private func filterWhitespace(from attributeRuns: [AttributeRun], in string: String) -> [AttributeRun] {
+    var result: [AttributeRun] = []
+
+    // Pre-compute visible character ranges in a single pass through the string
+    var visibleRanges: [NSRange] = []
+    var currentVisibleStart: Int? = nil
+    let utf16View = string.utf16
+    let utf16Count = utf16View.count
+
+    for (index, codeUnit) in utf16View.enumerated() {
+      let isVisible: Bool
+      if let scalar = Unicode.Scalar(codeUnit) {
+        isVisible = !invisibleCharacterers.contains(scalar)
+      } else {
+        // Surrogate pair - treat as visible
+        isVisible = true
+      }
+
+      if isVisible {
+        if currentVisibleStart == nil { currentVisibleStart = index }
+      } else if let start = currentVisibleStart {
+        visibleRanges.append(NSRange(location: start, length: index - start))
+        currentVisibleStart = nil
       }
     }
+    // Close any remaining visible range
+    if let start = currentVisibleStart {
+      visibleRanges.append(NSRange(location: start, length: utf16Count - start))
+    }
+
+    // Now filter attribute runs using the pre-computed visible ranges
+    for (attributes, range) in attributeRuns {
+      if attributes[.hideInvisibles] == nil {
+        // No whitespace hiding needed for this run
+        result.append((attributes: attributes, range: range))
+      } else {
+        // Intersect this run with visible ranges only
+        for visibleRange in visibleRanges {
+          if let intersection = range.intersection(visibleRange), intersection.length > 0 {
+            result.append((attributes: attributes, range: intersection))
+          }
+        }
+      }
+    }
+
+    return result
   }
 
   @available(*, unavailable)

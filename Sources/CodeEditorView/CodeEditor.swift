@@ -613,19 +613,24 @@ extension CodeEditor: UIViewRepresentable {
                                        messages: $messages,
                                        setAction: definitiveSetActions,
                                        setInfo: definitiveSetInfo)
-    if text != codeView.text {  // Hoping for the string comparison fast path...
+    // Only update codeView.text from the binding if:
+    // 1. The text is different AND
+    // 2. The codeView is NOT the first responder (user is not actively editing)
+    //
+    // This prevents cursor jumping caused by the setText debouncing:
+    // When user types, selection updates immediately but text binding is debounced.
+    // Without this check, the stale binding would overwrite the codeView's current text.
+    let isUserEditing = codeView.isFirstResponder
+    if text != codeView.text && !isUserEditing {
 
       if language.languageService !== codeView.language.languageService {
         (codeView.optCodeStorage?.delegate as? CodeStorageDelegate)?.skipNextChangeNotificationToLanguageService = true
       }
       codeView.text = text
-//      // FIXME: Stupid hack to force redrawing when the language doesn't change. (A language change already forces
-//      // FIXME: redrawing.)
-//      if language == codeView.language {
-//        Task { @MainActor in
-//          codeView.font = theme.font
-//        }
-//      }
+
+      // Perform one-time full document layout to ensure content is visible immediately
+      // and cache the document height for minimap positioning
+      codeView.performFullDocumentLayout()
 
     }
     if codeView.lastMessages != messages { codeView.update(messages: messages) }
@@ -823,19 +828,24 @@ extension CodeEditor: NSViewRepresentable {
                                        messages: $messages,
                                        setAction: definitiveSetActions,
                                        setInfo: definitiveSetInfo)
-    if text != codeView.string {  // Hoping for the string comparison fast path...
+    // Only update codeView.string from the binding if:
+    // 1. The text is different AND
+    // 2. The codeView is NOT the first responder (user is not actively editing)
+    //
+    // This prevents cursor jumping caused by the setText debouncing:
+    // When user types, selection updates immediately but text binding is debounced.
+    // Without this check, the stale binding would overwrite the codeView's current text.
+    let isUserEditing = codeView.window?.firstResponder === codeView
+    if text != codeView.string && !isUserEditing {
 
       if language.languageService !== codeView.language.languageService {
         (codeView.optCodeStorage?.delegate as? CodeStorageDelegate)?.skipNextChangeNotificationToLanguageService = true
       }
       codeView.string = text
-      // FIXME: Stupid hack to force redrawing when the language doesn't change. (A language change already forces
-      // FIXME: redrawing.)
-      if language == codeView.language {
-        Task { @MainActor in
-          codeView.font = theme.font
-        }
-      }
+
+      // Perform one-time full document layout to ensure content is visible immediately
+      // and cache the document height for minimap positioning
+      codeView.performFullDocumentLayout()
 
     }
     if codeView.lastMessages != messages { codeView.update(messages: messages) }

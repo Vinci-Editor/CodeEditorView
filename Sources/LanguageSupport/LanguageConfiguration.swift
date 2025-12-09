@@ -16,6 +16,7 @@
 
 import RegexBuilder
 import os
+import SwiftTreeSitter
 #if os(iOS) || os(visionOS)
 import UIKit
 #elseif os(macOS)
@@ -222,6 +223,25 @@ public struct LanguageConfiguration {
   ///
   public let languageService: LanguageService?
 
+  // MARK: - Tree-sitter Configuration
+
+  /// Factory function to create the tree-sitter Language for this configuration.
+  /// This is a factory to allow lazy loading of tree-sitter grammars.
+  ///
+  public let treeSitterLanguage: (() -> Language)?
+
+  /// The tree-sitter highlight query source (SCM format).
+  ///
+  public let treeSitterHighlightQuery: String?
+
+  /// Mapping from tree-sitter capture names to Token types.
+  ///
+  public let treeSitterCaptureMapping: [String: Token]?
+
+  /// Whether to prefer tree-sitter over regex-based tokenization when available.
+  ///
+  public let preferTreeSitter: Bool
+
   /// Defines a language configuration.
   ///
   public init(name: String,
@@ -238,7 +258,11 @@ public struct LanguageConfiguration {
               operatorRegex: Regex<Substring>?,
               reservedIdentifiers: [String],
               reservedOperators: [String],
-              languageService: LanguageService? = nil)
+              languageService: LanguageService? = nil,
+              treeSitterLanguage: (() -> Language)? = nil,
+              treeSitterHighlightQuery: String? = nil,
+              treeSitterCaptureMapping: [String: Token]? = nil,
+              preferTreeSitter: Bool = false)
   {
     self.name                               = name
     self.supportsSquareBrackets             = supportsSquareBrackets
@@ -255,6 +279,10 @@ public struct LanguageConfiguration {
     self.reservedIdentifiers                = reservedIdentifiers
     self.reservedOperators                  = reservedOperators
     self.languageService                    = languageService
+    self.treeSitterLanguage                 = treeSitterLanguage
+    self.treeSitterHighlightQuery           = treeSitterHighlightQuery
+    self.treeSitterCaptureMapping           = treeSitterCaptureMapping
+    self.preferTreeSitter                   = preferTreeSitter
   }
 
   /// Defines a language configuration.
