@@ -362,7 +362,23 @@ class CodeStorageDelegate: NSObject, NSTextStorageDelegate {
     }
 
     lineMap.updateAfterEditing(string: textStorage.string, range: editedRange, changeInLength: delta)
-    var (affectedRange: highlightingRange, lines: highlightingLines) = tokenise(range: editedRange, in: textStorage)
+
+    // Check if this is a large document initial load - defer tokenization to viewport-based approach
+    let isLargeInitialLoad = editedRange == NSRange(location: 0, length: textStorage.length)
+                             && editedRange.length > 50000  // ~1000+ lines threshold
+
+    var highlightingRange: NSRange
+    var highlightingLines: Int
+    if isLargeInitialLoad {
+      // Skip synchronous tokenization for large documents
+      // Mark all lines as pending - they'll be tokenized on-demand via TokenizationCoordinator
+      let totalLines = lineMap.lines.count
+      setTokenizationState(.pending, for: 0..<totalLines)
+      highlightingRange = editedRange
+      highlightingLines = 0
+    } else {
+      (highlightingRange, highlightingLines) = tokenise(range: editedRange, in: textStorage)
+    }
 
     processingStringReplacement = editedRange == NSRange(location: 0, length: textStorage.length)
 

@@ -39,7 +39,9 @@ extension NSScrollView {
     get { documentVisibleRect.origin.y }
     set {
 
-      (documentView as? CodeView)?.textLayoutManager?.textViewportLayoutController.layoutViewport()
+      // NOTE: Removed layoutViewport() call - it was forcing TextKit 2 to only layout the viewport,
+      // discarding full-document layout state. This caused content to "load in" as user scrolled.
+      // TextKit 2 handles viewport layout automatically via its textViewportLayoutController.
 
       let newOffset = max(0, min(newValue, (documentView?.bounds.height ?? 0) - contentSize.height))
       if abs(newOffset - documentVisibleRect.origin.y) > 0.0001 {

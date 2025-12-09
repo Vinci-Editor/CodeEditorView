@@ -239,6 +239,12 @@ final class CodeView: UITextView {
     // Initialize the tokenization coordinator
     tokenizationCoordinator.codeStorageDelegate = codeStorageDelegate
     tokenizationCoordinator.textStorage = codeStorage
+    tokenizationCoordinator.triggerRedraw = { [weak self] range in
+      if let textContentStorage = self?.optTextContentStorage,
+         let textRange = textContentStorage.textRange(for: range) {
+        self?.optTextLayoutManager?.invalidateRenderingAttributes(for: textRange)
+      }
+    }
 
     // Add a gutter view
     let gutterView  = GutterView(frame: .zero,
@@ -643,6 +649,12 @@ final class CodeView: NSTextView {
     // Initialize the tokenization coordinator
     tokenizationCoordinator.codeStorageDelegate = codeStorageDelegate
     tokenizationCoordinator.textStorage = codeStorage
+    tokenizationCoordinator.triggerRedraw = { [weak self] range in
+      if let textContentStorage = self?.optTextContentStorage,
+         let textRange = textContentStorage.textRange(for: range) {
+        self?.optTextLayoutManager?.invalidateRenderingAttributes(for: textRange)
+      }
+    }
 
     // Create the main gutter view
     let gutterView = GutterView(frame: CGRect.zero,
@@ -719,11 +731,8 @@ final class CodeView: NSTextView {
     maxSize = CGSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
 
 
-    // This is needed to redo layout of the minimap once all the views are laid out.
-    // FIXME: Unfortunately, this comes with a visible delay, though.
-    Task { @MainActor in
-      minimapView.textLayoutManager?.invalidateLayout(for: minimapView.textLayoutManager!.documentRange)
-    }
+    // NOTE: Removed deferred minimap invalidation - it was undoing the work of performFullDocumentLayout().
+    // The minimap layout is now handled by performFullDocumentLayout() called from CodeEditor.
 
     // We need to re-tile the subviews whenever the frame of the text view changes.
     frameChangedNotificationObserver
@@ -1219,6 +1228,16 @@ extension CodeView {
     // NOTE: Removed highlight updates from tile() - these are now only called on selection/message changes
     // updateCurrentLineHighlight() is called from updateBackgroundFor() when selection changes
     // updateMessageLineHighlights() is called from update(messages:) when messages change
+
+    // Notify tokenization coordinator of viewport changes for deferred tokenization
+    if let textLayoutManager = optTextLayoutManager,
+       let viewportRange = textLayoutManager.textViewportLayoutController.viewportRange,
+       let textContentStorage = optTextContentStorage {
+      let charRange = textContentStorage.range(for: viewportRange)
+      let visibleLines = codeStorageDelegate.lineMap.linesContaining(range: charRange)
+      tokenizationCoordinator.viewportDidChange(startLine: visibleLines.lowerBound,
+                                                 endLine: visibleLines.upperBound)
+    }
   }
 
 
