@@ -75,9 +75,29 @@ final class CodeView: UITextView {
   // Notification observer
   private var textDidChangeObserver: NSObjectProtocol?
 
-  /// Coordinator for viewport-based tokenization.
+  /// Background tokenizer for viewport-based tokenization (replaces old TokenizationCoordinator).
   ///
-  private let tokenizationCoordinator = TokenizationCoordinator()
+  private let backgroundTokenizer = BackgroundTokenizer()
+
+  /// Viewport predictor for pre-tokenizing content before it scrolls into view.
+  ///
+  private let viewportPredictor = ViewportPredictor()
+
+  /// Estimator for instant document height calculation (avoids full layout on load).
+  ///
+  private var heightEstimator: HeightEstimator?
+
+  /// Task for progressive background layout after initial viewport render.
+  ///
+  private var progressiveLayoutTask: Task<Void, Never>?
+
+  /// Work item for debouncing viewport change notifications to reduce tokenization triggers during scroll.
+  ///
+  private var viewportChangeWorkItem: DispatchWorkItem?
+
+  /// Debounce interval for viewport changes (50ms reduces triggers from 60+ to ~20 per second).
+  ///
+  private let viewportChangeDebounceInterval: TimeInterval = 0.016  // ~60fps, minimal debounce
 
   /// Contains the line on which the insertion point was located, the last time the selection range got set (if the
   /// selection was an insertion point at all; i.e., it's length was 0).
@@ -164,11 +184,20 @@ final class CodeView: UITextView {
   ///
   private let minimapUpdateThrottleInterval: CFAbsoluteTime = 0.016  // ~60fps
 
-  /// Invalidate cached document heights when content changes.
+  /// Invalidate and recalculate cached document heights when content changes.
+  /// Uses height estimation for instant updates instead of full layout.
   ///
   func invalidateDocumentHeightCache() {
-    cachedCodeHeight = nil
-    cachedMinimapHeight = nil
+    let lineCount = codeStorageDelegate.lineMap.lines.count
+    if let estimator = heightEstimator {
+      cachedCodeHeight = estimator.estimatedHeight(for: lineCount)
+      cachedMinimapHeight = estimator.estimatedMinimapHeight(for: lineCount)
+    } else {
+      // Fallback: estimate based on font line height
+      let lineHeight = theme.font.lineHeight
+      cachedCodeHeight = CGFloat(lineCount) * lineHeight
+      cachedMinimapHeight = CGFloat(lineCount) * (lineHeight / minimapRatio)
+    }
   }
 
   /// Designated initializer for code views with a gutter.
@@ -244,15 +273,40 @@ final class CodeView: UITextView {
     // Add a text storage delegate that maintains a line map
     codeStorage.delegate = codeStorageDelegate
 
-    // Initialize the tokenization coordinator
-    tokenizationCoordinator.codeStorageDelegate = codeStorageDelegate
-    tokenizationCoordinator.textStorage = codeStorage
-    tokenizationCoordinator.triggerRedraw = { [weak self] range in
-      if let textContentStorage = self?.optTextContentStorage,
+    // Initialize the background tokenizer (replaces old TokenizationCoordinator)
+    backgroundTokenizer.codeStorageDelegate = codeStorageDelegate
+    backgroundTokenizer.textStorage = codeStorage
+    backgroundTokenizer.triggerRedraw = { [weak self] range in
+      guard let self else { return }
+      if let textContentStorage = self.optTextContentStorage,
          let textRange = textContentStorage.textRange(for: range) {
-        self?.optTextLayoutManager?.invalidateRenderingAttributes(for: textRange)
+        // Light-weight invalidation (just marks attributes as dirty)
+        self.optTextLayoutManager?.invalidateRenderingAttributes(for: textRange)
+        // Also invalidate minimap so it picks up new tokens
+        self.minimapView?.textLayoutManager?.invalidateRenderingAttributes(for: textRange)
       }
+      // Mark views as needing display - TextKit 2 will call validators during draw
+      #if os(iOS) || os(visionOS)
+      self.setNeedsDisplay()
+      self.minimapView?.setNeedsDisplay()
+      #else
+      self.needsDisplay = true
+      self.minimapView?.needsDisplay = true
+      #endif
     }
+    // Start the background tokenizer
+    backgroundTokenizer.start()
+
+    // Initialize the viewport predictor with font line height
+    viewportPredictor.setLineHeight(theme.font.lineHeight)
+
+    // Initialize the height estimator for instant document height calculation
+    heightEstimator = HeightEstimator(config: HeightEstimator.Configuration(
+      font: theme.font,
+      wrapText: viewLayout.wrapText,
+      containerWidth: frame.width,
+      minimapRatio: minimapRatio
+    ))
 
     // Add a gutter view
     let gutterView  = GutterView(frame: .zero,
@@ -442,9 +496,29 @@ final class CodeView: NSTextView {
   private var didChangeNotificationObserver:          NSObjectProtocol?
   private var didChangeSelectionNotificationObserver: NSObjectProtocol?
 
-  /// Coordinator for viewport-based tokenization.
+  /// Background tokenizer for viewport-based tokenization (replaces old TokenizationCoordinator).
   ///
-  private let tokenizationCoordinator = TokenizationCoordinator()
+  private let backgroundTokenizer = BackgroundTokenizer()
+
+  /// Viewport predictor for pre-tokenizing content before it scrolls into view.
+  ///
+  private let viewportPredictor = ViewportPredictor()
+
+  /// Estimator for instant document height calculation (avoids full layout on load).
+  ///
+  private var heightEstimator: HeightEstimator?
+
+  /// Task for progressive background layout after initial viewport render.
+  ///
+  private var progressiveLayoutTask: Task<Void, Never>?
+
+  /// Work item for debouncing viewport change notifications to reduce tokenization triggers during scroll.
+  ///
+  private var viewportChangeWorkItem: DispatchWorkItem?
+
+  /// Debounce interval for viewport changes (50ms reduces triggers from 60+ to ~20 per second).
+  ///
+  private let viewportChangeDebounceInterval: TimeInterval = 0.016  // ~60fps, minimal debounce
 
   /// Contains the line on which the insertion point was located, the last time the selection range got set (if the
   /// selection was an insertion point at all; i.e., it's length was 0).
@@ -542,14 +616,23 @@ final class CodeView: NSTextView {
   ///
   private let minimapUpdateThrottleInterval: CFAbsoluteTime = 0.016  // ~60fps
 
-  /// Invalidate cached document heights when content changes.
+  /// Invalidate and recalculate cached document heights when content changes.
+  /// Uses height estimation for instant updates instead of full layout.
   ///
   func invalidateDocumentHeightCache() {
-    cachedCodeHeight = nil
-    cachedMinimapHeight = nil
+    let lineCount = codeStorageDelegate.lineMap.lines.count
+    if let estimator = heightEstimator {
+      cachedCodeHeight = estimator.estimatedHeight(for: lineCount)
+      cachedMinimapHeight = estimator.estimatedMinimapHeight(for: lineCount)
+    } else {
+      // Fallback: estimate based on font line height
+      let lineHeight = theme.font.lineHeight
+      cachedCodeHeight = CGFloat(lineCount) * lineHeight
+      cachedMinimapHeight = CGFloat(lineCount) * (lineHeight / minimapRatio)
+    }
   }
 
-  /// NOTE: Removed computeDocumentHeightsAsync() - heights are now set by performFullDocumentLayout()
+  /// NOTE: Removed computeDocumentHeightsAsync() - heights are now set by performInitialLayout()
 
   /// For the consumption of the diagnostics stream.
   ///
@@ -662,15 +745,40 @@ final class CodeView: NSTextView {
     // Add a text storage delegate that maintains a line map
     codeStorage.delegate = codeStorageDelegate
 
-    // Initialize the tokenization coordinator
-    tokenizationCoordinator.codeStorageDelegate = codeStorageDelegate
-    tokenizationCoordinator.textStorage = codeStorage
-    tokenizationCoordinator.triggerRedraw = { [weak self] range in
-      if let textContentStorage = self?.optTextContentStorage,
+    // Initialize the background tokenizer (replaces old TokenizationCoordinator)
+    backgroundTokenizer.codeStorageDelegate = codeStorageDelegate
+    backgroundTokenizer.textStorage = codeStorage
+    backgroundTokenizer.triggerRedraw = { [weak self] range in
+      guard let self else { return }
+      if let textContentStorage = self.optTextContentStorage,
          let textRange = textContentStorage.textRange(for: range) {
-        self?.optTextLayoutManager?.invalidateRenderingAttributes(for: textRange)
+        // Light-weight invalidation (just marks attributes as dirty)
+        self.optTextLayoutManager?.invalidateRenderingAttributes(for: textRange)
+        // Also invalidate minimap so it picks up new tokens
+        self.minimapView?.textLayoutManager?.invalidateRenderingAttributes(for: textRange)
       }
+      // Mark views as needing display - TextKit 2 will call validators during draw
+      #if os(iOS) || os(visionOS)
+      self.setNeedsDisplay()
+      self.minimapView?.setNeedsDisplay()
+      #else
+      self.needsDisplay = true
+      self.minimapView?.needsDisplay = true
+      #endif
     }
+    // Start the background tokenizer
+    backgroundTokenizer.start()
+
+    // Initialize the viewport predictor with font line height
+    viewportPredictor.setLineHeight(theme.font.lineHeight)
+
+    // Initialize the height estimator for instant document height calculation
+    heightEstimator = HeightEstimator(config: HeightEstimator.Configuration(
+      font: theme.font,
+      wrapText: viewLayout.wrapText,
+      containerWidth: frame.width,
+      minimapRatio: minimapRatio
+    ))
 
     // Create the main gutter view
     let gutterView = GutterView(frame: CGRect.zero,
@@ -1079,35 +1187,136 @@ extension CodeView {
     }
   }
 
-  /// Perform ONE-TIME full document layout after text is set.
-  /// This ensures all content is visible immediately and caches the document height.
+  /// Perform initial document setup with height estimation and viewport-only layout.
+  /// For monospaced fonts without word wrap, this provides instant render.
   /// Should only be called once after setting text, NOT during scrolling.
   ///
-  func performFullDocumentLayout() {
+  func performInitialLayout() {
     guard let mainTextLayoutManager = optTextLayoutManager else { return }
 
-    // Layout the entire document for the main view
-    mainTextLayoutManager.ensureLayout(for: mainTextLayoutManager.documentRange)
+    // Get line count from line map (already computed during text storage update)
+    let lineCount = codeStorageDelegate.lineMap.lines.count
 
-    // Cache the actual document height
-    if let height = mainTextLayoutManager.textLayoutFragmentExtent(for: mainTextLayoutManager.documentRange)?.height {
-      cachedCodeHeight = height
+    // Use height estimation for instant heights (no full layout needed)
+    if let estimator = heightEstimator {
+      cachedCodeHeight = estimator.estimatedHeight(for: lineCount)
+      cachedMinimapHeight = estimator.estimatedMinimapHeight(for: lineCount)
+    } else {
+      // Fallback: estimate based on font line height
+      let lineHeight = theme.font.lineHeight
+      cachedCodeHeight = CGFloat(lineCount) * lineHeight
+      cachedMinimapHeight = CGFloat(lineCount) * (lineHeight / minimapRatio)
     }
 
-    // Layout the entire document for the minimap
+    // Only layout the visible viewport - NOT the entire document
+    let viewportBounds = mainTextLayoutManager.textViewportLayoutController.viewportBounds
+    mainTextLayoutManager.ensureLayout(for: viewportBounds)
+
+    // Only layout the visible minimap viewport
     if let minimapTextLayoutManager = minimapView?.textLayoutManager {
-      minimapTextLayoutManager.ensureLayout(for: minimapTextLayoutManager.documentRange)
-
-      if let height = minimapTextLayoutManager.textLayoutFragmentExtent(for: minimapTextLayoutManager.documentRange)?.height {
-        cachedMinimapHeight = height
-      }
+      let minimapViewportBounds = minimapTextLayoutManager.textViewportLayoutController.viewportBounds
+      minimapTextLayoutManager.ensureLayout(for: minimapViewportBounds)
     }
 
-    // Update current line highlight and message highlights now that layout is complete
+    // Update current line highlight and message highlights
     if let textLocation = optTextContentStorage?.textLocation(for: selectedRange.location) {
       updateCurrentLineHighlight(for: textLocation)
     }
     updateMessageLineHighlights()
+
+    // Position the minimap correctly with estimated heights
+    adjustScrollPositionOfMinimap()
+
+    // Trigger tokenization for the visible viewport lines
+    if let viewportRange = mainTextLayoutManager.textViewportLayoutController.viewportRange,
+       let textContentStorage = optTextContentStorage {
+      let charRange = textContentStorage.range(for: viewportRange)
+      let visibleLines = codeStorageDelegate.lineMap.linesContaining(range: charRange)
+
+      // Update background tokenizer with visible viewport
+      backgroundTokenizer.viewportDidChange(startLine: visibleLines.lowerBound,
+                                             endLine: visibleLines.upperBound)
+
+      // Update viewport predictor and set priority viewport for pre-tokenization
+      let totalLines = codeStorageDelegate.lineMap.lines.count
+      let predictedViewport = viewportPredictor.predictedViewport(current: visibleLines, totalLines: totalLines)
+      backgroundTokenizer.setPriorityViewport(predictedViewport)
+    }
+
+    // Schedule progressive layout for remaining content in background
+    scheduleProgressiveLayout()
+  }
+
+  /// Legacy method name for compatibility - calls performInitialLayout
+  ///
+  func performFullDocumentLayout() {
+    performInitialLayout()
+  }
+
+  /// Schedule progressive background layout after initial viewport render.
+  /// This ensures all content is eventually laid out for accurate navigation.
+  ///
+  private func scheduleProgressiveLayout() {
+    progressiveLayoutTask?.cancel()
+
+    progressiveLayoutTask = Task { [weak self] in
+      // Wait a bit to let initial render complete
+      try? await Task.sleep(nanoseconds: 100_000_000) // 100ms
+
+      guard !Task.isCancelled, let self else { return }
+
+      await self.progressivelyLayoutDocument()
+    }
+  }
+
+  /// Progressively layout the document in chunks, yielding to keep UI responsive.
+  ///
+  @MainActor
+  private func progressivelyLayoutDocument() async {
+    guard let textLayoutManager = optTextLayoutManager,
+          let textContentStorage = optTextContentStorage
+    else { return }
+
+    let documentRange = textLayoutManager.documentRange
+
+    // Layout in chunks of ~50 lines worth of characters
+    let chunkSize = 50 * 80 // ~50 lines at 80 chars each
+
+    var currentLocation = documentRange.location
+
+    while currentLocation.compare(documentRange.endLocation) == .orderedAscending {
+      guard !Task.isCancelled else { return }
+
+      // Calculate chunk end location
+      let endLocation = textContentStorage.location(currentLocation, offsetBy: chunkSize)
+        ?? documentRange.endLocation
+
+      if let chunkRange = NSTextRange(location: currentLocation, end: endLocation) {
+        textLayoutManager.ensureLayout(for: chunkRange)
+      }
+
+      currentLocation = endLocation
+
+      // Yield to keep UI responsive
+      await Task.yield()
+    }
+
+    // If word wrap is enabled, update heights with actual layout after progressive layout completes
+    if viewLayout.wrapText {
+      if let actualHeight = textLayoutManager.textLayoutFragmentExtent(for: documentRange)?.height {
+        // Only update if significantly different from estimate
+        if let cached = cachedCodeHeight, abs(actualHeight - cached) > 10 {
+          cachedCodeHeight = actualHeight
+          // Trigger re-layout of minimap positioning
+          adjustScrollPositionOfMinimap()
+        }
+      }
+
+      if let minimapTextLayoutManager = minimapView?.textLayoutManager,
+         let actualMinimapHeight = minimapTextLayoutManager.textLayoutFragmentExtent(for: minimapTextLayoutManager.documentRange)?.height {
+        cachedMinimapHeight = actualMinimapHeight
+      }
+    }
   }
 
   /// Position and size the gutter and minimap and set the text container sizes and exclusion paths. Take the current
@@ -1245,14 +1454,32 @@ extension CodeView {
     // updateCurrentLineHighlight() is called from updateBackgroundFor() when selection changes
     // updateMessageLineHighlights() is called from update(messages:) when messages change
 
-    // Notify tokenization coordinator of viewport changes for deferred tokenization
-    if let textLayoutManager = optTextLayoutManager,
-       let viewportRange = textLayoutManager.textViewportLayoutController.viewportRange,
-       let textContentStorage = optTextContentStorage {
+    // Update viewport predictor with scroll position
+    viewportPredictor.update(scrollOffset: documentVisibleRect.origin.y)
+
+    // Notify background tokenizer of viewport changes for deferred tokenization (debounced)
+    // This reduces tokenization triggers from 60+ per second during scrolling to ~20
+    viewportChangeWorkItem?.cancel()
+    viewportChangeWorkItem = DispatchWorkItem { [weak self] in
+      guard let self,
+            let textLayoutManager = self.optTextLayoutManager,
+            let viewportRange = textLayoutManager.textViewportLayoutController.viewportRange,
+            let textContentStorage = self.optTextContentStorage
+      else { return }
       let charRange = textContentStorage.range(for: viewportRange)
-      let visibleLines = codeStorageDelegate.lineMap.linesContaining(range: charRange)
-      tokenizationCoordinator.viewportDidChange(startLine: visibleLines.lowerBound,
-                                                 endLine: visibleLines.upperBound)
+      let visibleLines = self.codeStorageDelegate.lineMap.linesContaining(range: charRange)
+
+      // Update background tokenizer with visible viewport
+      self.backgroundTokenizer.viewportDidChange(startLine: visibleLines.lowerBound,
+                                                  endLine: visibleLines.upperBound)
+
+      // Set priority viewport for pre-tokenization based on scroll velocity
+      let totalLines = self.codeStorageDelegate.lineMap.lines.count
+      let predictedViewport = self.viewportPredictor.predictedViewport(current: visibleLines, totalLines: totalLines)
+      self.backgroundTokenizer.setPriorityViewport(predictedViewport)
+    }
+    if let workItem = viewportChangeWorkItem {
+      DispatchQueue.main.asyncAfter(deadline: .now() + viewportChangeDebounceInterval, execute: workItem)
     }
   }
 

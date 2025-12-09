@@ -159,13 +159,33 @@ extension CodeStorage {
   ///
   func setHighlightingAttributes(for range: NSRange, in layoutManager: NSTextLayoutManager)
   {
-      guard let contentStorage = layoutManager.textContentManager as? NSTextContentStorage
+      guard let contentStorage = layoutManager.textContentManager as? NSTextContentStorage,
+            let delegate = self.delegate as? CodeStorageDelegate
       else { return }
 
+      // Set default text color first
       if let textRange = contentStorage.textRange(for: range) {
         layoutManager.setRenderingAttributes([.foregroundColor: theme.textColour, .hideInvisibles: ()],
                                              for: textRange)
       }
+
+      // On-demand tokenization: If lines in this range haven't been tokenized yet, tokenize them now.
+      // This ensures the first render has highlighting instead of waiting for background tokenization.
+      // PERFORMANCE: Limit trailing lines to 5 to prevent cascading through the entire file when
+      // editing inside comments. The background tokenizer will handle the rest asynchronously.
+      let lines = delegate.lineMap.linesContaining(range: range)
+      for line in lines where line < delegate.lineMap.lines.count {
+        let lineInfo = delegate.lineMap.lines[line].info
+        // If info is nil or not tokenized, tokenize this line synchronously
+        if lineInfo == nil || lineInfo?.tokenizationState != .tokenized {
+          if let lineRange = delegate.lineMap.lookup(line: line)?.range {
+            let _ = delegate.tokenise(range: lineRange, in: self, maxTrailingLines: 5)
+            delegate.setTokenizationState(.tokenized, for: line..<(line + 1))
+          }
+        }
+      }
+
+      // Now enumerate tokens (should have them from on-demand tokenization above)
       enumerateTokens(in: range) { lineToken in
 
         if let documentRange = lineToken.range.intersection(range),

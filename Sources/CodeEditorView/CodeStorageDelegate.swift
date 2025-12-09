@@ -65,8 +65,9 @@ struct LineInfo {
   }
 
   /// Current tokenization state of this line.
+  /// Default is .pending so new lines get tokenized by BackgroundTokenizer.
   ///
-  var tokenizationState: TokenizationState = .tokenized
+  var tokenizationState: TokenizationState = .pending
 
   /// Structure characterising a bundle of messages reported for a single line. It features a stable identity to be able
   /// to associate display information in separate structures. Messages are paired with the zero-based column index to
@@ -374,22 +375,34 @@ class CodeStorageDelegate: NSObject, NSTextStorageDelegate {
 
     lineMap.updateAfterEditing(string: cachedString, range: editedRange, changeInLength: delta)
 
-    // Check if this is a large document initial load - defer tokenization to viewport-based approach
-    let isLargeInitialLoad = editedRange == NSRange(location: 0, length: textStorage.length)
-                             && editedRange.length > 50000  // ~1000+ lines threshold
+    // PERFORMANCE FIX: Defer tokenization to background for most edits.
+    // Synchronous tokenization on the main thread was killing typing performance.
+    //
+    // We defer tokenization for:
+    // - Large document initial loads (as before)
+    // - Regular edits (NEW - this is the key performance fix)
+    //
+    // We only do synchronous tokenization for token completion (auto-close brackets)
+    // which needs immediate token context.
+    let isInitialLoad = editedRange == NSRange(location: 0, length: textStorage.length)
+    let lineCount = lineMap.lines.count
+    let isLargeDocument = editedRange.length > 10000 || lineCount > 100
+    let affectedLines = lineMap.linesAffected(by: editedRange, changeInLength: delta)
 
     var highlightingRange: NSRange
     var highlightingLines: Int
-    if isLargeInitialLoad {
-      // Skip synchronous tokenization for large documents
-      // Mark all lines as pending - they'll be tokenized on-demand via TokenizationCoordinator
-      let totalLines = lineMap.lines.count
-      setTokenizationState(.pending, for: 0..<totalLines)
-      highlightingRange = editedRange
-      highlightingLines = 0
+
+    // Always defer tokenization to background - mark affected lines as invalidated
+    // The BackgroundTokenizer will pick these up and tokenize them
+    if isInitialLoad && isLargeDocument {
+      // Large initial load - mark ALL lines as pending
+      setTokenizationState(.pending, for: 0..<lineCount)
     } else {
-      (highlightingRange, highlightingLines) = tokenise(range: editedRange, in: textStorage)
+      // Regular edit - mark affected lines as invalidated
+      setTokenizationState(.invalidated, for: affectedLines)
     }
+    highlightingRange = editedRange
+    highlightingLines = 0
 
     processingStringReplacement = editedRange == NSRange(location: 0, length: textStorage.length)
 
@@ -443,7 +456,23 @@ class CodeStorageDelegate: NSObject, NSTextStorageDelegate {
     // binding, this check inside `CodeEditor.updateNSView(_:context:)` and `CodeEditor.updateUIView(_:context:)` will
     // suggest that the text storage needs to be overwritten by the contents of the binding, incorrectly removing any
     // entered composing characters (i.e., the marked text).
-    setText(cachedString)
+    //
+    // PERFORMANCE: We debounce setText calls for single-character additions to avoid copying the entire file
+    // on every keystroke. For larger edits (paste, undo, initial load), we call immediately to maintain consistency.
+    if processingOneCharacterAddition {
+      // Debounce single-character edits to reduce string copies during rapid typing
+      pendingSetTextWorkItem?.cancel()
+      let text = cachedString
+      pendingSetTextWorkItem = DispatchWorkItem { [weak self] in
+        self?.setText(text)
+      }
+      DispatchQueue.main.asyncAfter(deadline: .now() + setTextDebounceInterval,
+                                    execute: pendingSetTextWorkItem!)
+    } else if !processingStringReplacement {
+      // For larger edits (paste, undo), call immediately
+      setText(cachedString)
+    }
+    // For processingStringReplacement (initial load), skip - the string is already being set through another path
 
     // Notify language service (if attached)
     notifyLanguageServiceOfChange(in: textStorage, cachedString: cachedString, range: editedRange, changeInLength: delta)
@@ -574,18 +603,20 @@ extension CodeStorageDelegate {
 
   /// Tokenise the substring of the given text storage that contains the specified lines and store tokens as part of the
   /// line information.
-  /// 
+  ///
   /// - Parameters:
   ///   - originalRange: The character range that contains all characters that have changed.
   ///   - textStorage: The text storage that contains the changed characters.
+  ///   - maxTrailingLines: Maximum number of trailing lines to process beyond the original range.
+  ///                       Set to `nil` for unlimited (default). Set to 0 for no trailing processing.
   /// - Returns: The range of text affected by tokenisation together with the number of lines the range spreads over.
   ///     This can be more than the `originalRange` as changes in commenting and the like might affect large portions of
   ///     text.
   ///
   /// Tokenisation happens at line granularity. Hence, the range is correspondingly extended. Moreover, tokens must not
   /// span across lines as they will always only associated with the line on which they start.
-  /// 
-  func tokenise(range originalRange: NSRange, in textStorage: NSTextStorage) -> (affectedRange: NSRange, lines: Int) {
+  ///
+  func tokenise(range originalRange: NSRange, in textStorage: NSTextStorage, maxTrailingLines: Int? = nil) -> (affectedRange: NSRange, lines: Int) {
 
     // NB: The range property of the tokens is in terms of the entire text (not just `line`).
     func tokeniseAndUpdateInfo<Tokens: Collection<Tokeniser<LanguageConfiguration.Token,
@@ -738,12 +769,16 @@ extension CodeStorageDelegate {
     }
 
     // Continue to re-process line by line until there is no longer a change in the comment depth before and after
-    // re-processing
+    // re-processing. If maxTrailingLines is specified, limit processing to avoid blocking the main thread.
     //
     var currentLine       = lines.endIndex
     var highlightingRange = range
     var highlightingLines = lines.count
+    var trailingLinesProcessed = 0
     trailingLineLoop: while currentLine < lineMap.lines.count {
+
+      // Check if we've hit the trailing line limit
+      if let limit = maxTrailingLines, trailingLinesProcessed >= limit { break trailingLineLoop }
 
       if let lineEntry      = lineMap.lookup(line: currentLine),
          let lineEntryRange = Range<String.Index>(lineEntry.range, in: textStorage.string)
@@ -771,6 +806,7 @@ extension CodeStorageDelegate {
         // Keep track of the trailing range to report back to the caller.
         highlightingRange = NSUnionRange(highlightingRange, lineEntry.range)
         highlightingLines += 1
+        trailingLinesProcessed += 1
 
       }
       currentLine += 1

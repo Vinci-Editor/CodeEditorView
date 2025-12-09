@@ -613,7 +613,15 @@ extension CodeEditor: UIViewRepresentable {
                                        messages: $messages,
                                        setAction: definitiveSetActions,
                                        setInfo: definitiveSetInfo)
-    if text != codeView.text {  // Hoping for the string comparison fast path...
+    // Only update codeView.text from the binding if:
+    // 1. The text is different AND
+    // 2. The codeView is NOT the first responder (user is not actively editing)
+    //
+    // This prevents cursor jumping caused by the setText debouncing:
+    // When user types, selection updates immediately but text binding is debounced.
+    // Without this check, the stale binding would overwrite the codeView's current text.
+    let isUserEditing = codeView.isFirstResponder
+    if text != codeView.text && !isUserEditing {
 
       if language.languageService !== codeView.language.languageService {
         (codeView.optCodeStorage?.delegate as? CodeStorageDelegate)?.skipNextChangeNotificationToLanguageService = true
@@ -820,7 +828,15 @@ extension CodeEditor: NSViewRepresentable {
                                        messages: $messages,
                                        setAction: definitiveSetActions,
                                        setInfo: definitiveSetInfo)
-    if text != codeView.string {  // Hoping for the string comparison fast path...
+    // Only update codeView.string from the binding if:
+    // 1. The text is different AND
+    // 2. The codeView is NOT the first responder (user is not actively editing)
+    //
+    // This prevents cursor jumping caused by the setText debouncing:
+    // When user types, selection updates immediately but text binding is debounced.
+    // Without this check, the stale binding would overwrite the codeView's current text.
+    let isUserEditing = codeView.window?.firstResponder === codeView
+    if text != codeView.string && !isUserEditing {
 
       if language.languageService !== codeView.language.languageService {
         (codeView.optCodeStorage?.delegate as? CodeStorageDelegate)?.skipNextChangeNotificationToLanguageService = true

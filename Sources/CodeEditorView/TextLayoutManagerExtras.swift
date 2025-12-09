@@ -248,20 +248,17 @@ extension NSTextLayoutManager {
 // `setRenderingAttributes(_:for:)` (and related methods) will set rendering attributes in the vicinity of the edit
 // location for shifted character ranges (if the edit operation changes the length of the text).
 //
-// It turns out that we can work around this issue by delaying the calls to `setRenderingAttributes(_:for:)` until after
-// `NSTextContentManager.hasEditingTransaction` is `false`. We achieve this by using KVO to observe
-// `hasEditingTransaction`, in order to trigger attribute setting after the editing transaction has completed.
-//
-// Unfortunately, the fix involving `NSTextContentManager.hasEditingTransaction`, on its own, is not sufficient, as
-// `hasEditingTransaction` is not being used in case of a a paste command or in case of an undo/redo. In these cases,
-// we wait until the `CodeViewDelegate` receives a `textDidChange` notification to trigger setting the attributes.
+// IMPORTANT: We ONLY defer during active editing transactions. During scrolling (when hasEditingTransaction is false),
+// we MUST apply attributes immediately, otherwise content scrolling into view will never be highlighted.
+// The previous implementation deferred all attributes and only processed them on textDidChange, which broke scroll
+// highlighting because textDidChange doesn't fire during scrolling.
 
 extension NSTextLayoutManager {
 
   private final class PendingTextLayoutFragments {
     var fragments: [NSTextLayoutFragment] = []
   }
-  
+
   /// Set the rendering attribute validator in a way that it avoids the timing bug with updating internal layout
   /// manager structures on (at least) macOS 14.
   ///
@@ -285,16 +282,15 @@ extension NSTextLayoutManager {
     let pendingFragments = PendingTextLayoutFragments()
 
     self.renderingAttributesValidator = { textLayoutManager, textLayoutFragment in
-
-      // We delay setting attributes, except if the entire text has been replaced by a new one. In that case, it is
-      // fine to set the attributes right away.
-      if let textContentStorage  = textLayoutManager.textContentManager as? NSTextContentStorage,
-         let codeStorageDelegate = textContentStorage.textStorage?.delegate as? CodeStorageDelegate,
-         codeStorageDelegate.processingStringReplacement
-      {
-        renderingAttributesValidator(textLayoutManager, textLayoutFragment)
-      } else {
+      // CRITICAL: Only defer during active editing transactions to work around macOS 14 bug.
+      // During scrolling (when NOT in an editing transaction), apply attributes IMMEDIATELY.
+      // This is essential for scroll highlighting to work.
+      if textContentManager.hasEditingTransaction {
+        // Defer to avoid the macOS 14 timing bug during edits
         pendingFragments.fragments.append(textLayoutFragment)
+      } else {
+        // Apply immediately - this is the normal case (scrolling, initial load, etc.)
+        renderingAttributesValidator(textLayoutManager, textLayoutFragment)
       }
     }
 
