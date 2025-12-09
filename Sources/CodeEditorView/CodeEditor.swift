@@ -886,6 +886,31 @@ extension CodeEditor: NSViewRepresentable {
 
       }
     }
+
+    // Check if scroll view size changed and force full document re-layout if needed
+    // This ensures TextKit 2 lays out the entire document when the view resizes
+    // Debounced to avoid lag during continuous window resizing
+    let currentSize = scrollView.frame.size
+    if context.coordinator.lastScrollViewSize != currentSize {
+      context.coordinator.lastScrollViewSize = currentSize
+
+      // Mark as resizing to skip expensive operations
+      context.coordinator.isResizing = true
+      codeView.isResizing = true
+
+      // Cancel any pending work
+      context.coordinator.relayoutWorkItem?.cancel()
+      context.coordinator.resizeEndWorkItem?.cancel()
+
+      // Schedule end of resize detection (200ms after last size change)
+      let resizeEndWork = DispatchWorkItem { [weak codeView] in
+        context.coordinator.isResizing = false
+        codeView?.isResizing = false
+        codeView?.invalidateAndRelayoutFullDocument()
+      }
+      context.coordinator.resizeEndWorkItem = resizeEndWork
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: resizeEndWork)
+    }
   }
 
   public func makeCoordinator() -> Coordinator {
@@ -900,6 +925,10 @@ extension CodeEditor: NSViewRepresentable {
     var boundsChangedNotificationObserver: NSObjectProtocol?
     var extraActionsCancellable:           Cancellable?
     var breakUndoCoalescingCancellable:    Cancellable?
+    var lastScrollViewSize:                CGSize = .zero
+    var relayoutWorkItem:                  DispatchWorkItem?
+    var isResizing:                        Bool = false
+    var resizeEndWorkItem:                 DispatchWorkItem?
 
     deinit {
       if let observer = boundsChangedNotificationObserver { NotificationCenter.default.removeObserver(observer) }

@@ -201,11 +201,13 @@ final class CodeView: UITextView {
       cachedMinimapHeight = CGFloat(lineCount) * (lineHeight / minimapRatio)
     }
 
-    // Update frame size to match estimated height (prevents jelly scrolling)
+    // Update content size to match estimated height (prevents jelly scrolling)
+    // On iOS, UITextView inherits from UIScrollView, so contentSize determines scrollable area
     if let estimatedHeight = cachedCodeHeight {
       let minHeight = max(estimatedHeight, documentVisibleRect.height)
-      if frame.size.height != minHeight {
-        frame.size.height = minHeight
+      let newContentSize = CGSize(width: bounds.width, height: minHeight)
+      if contentSize != newContentSize {
+        contentSize = newContentSize
       }
     }
   }
@@ -508,6 +510,9 @@ final class CodeView: NSTextView {
   private var frameChangedNotificationObserver:       NSObjectProtocol?
   private var didChangeNotificationObserver:          NSObjectProtocol?
   private var didChangeSelectionNotificationObserver: NSObjectProtocol?
+
+  /// Flag indicating the view is currently being resized - skip expensive operations.
+  var isResizing: Bool = false
 
   /// Background tokenizer for viewport-based tokenization (replaces old TokenizationCoordinator).
   ///
@@ -881,17 +886,8 @@ final class CodeView: NSTextView {
     // NOTE: Removed deferred minimap invalidation - it was undoing the work of performFullDocumentLayout().
     // The minimap layout is now handled by performFullDocumentLayout() called from CodeEditor.
 
-    // We need to re-tile the subviews whenever the frame of the text view changes.
-    frameChangedNotificationObserver
-      = NotificationCenter.default.addObserver(forName: NSView.frameDidChangeNotification,
-                                               object: enclosingScrollView,
-                                               queue: .main) { [weak self] _ in
-
-        // NB: When resizing the window, where the text container doesn't completely fill the text view (i.e., the text
-        //     is short), we need to explicitly redraw the gutter, as line wrapping may have changed, which affects
-        //     line numbering.
-        self?.gutterView?.needsDisplay = true
-      }
+    // NOTE: Frame change observation is set up in viewDidMoveToSuperview() when enclosingScrollView is available.
+    // This ensures we observe the correct object and can properly trigger layout recalculation.
 
     // We need to check whether we need to look up completions or cancel a running completion process after every text
     // change. We also need to invalidate the views of all in the meantime invalidated message views.
@@ -998,11 +994,111 @@ final class CodeView: NSTextView {
   }
 
   override func layout() {
+    // Skip expensive layout operations during resize
+    if isResizing {
+      super.layout()
+      return
+    }
     tile()
     adjustScrollPositionOfMinimap()
     super.layout()
     gutterView?.needsDisplay        = true
     minimapGutterView?.needsDisplay = true
+  }
+
+  override func setFrameSize(_ newSize: NSSize) {
+    // During resize, just pass through to avoid expensive calculations
+    if isResizing {
+      super.setFrameSize(newSize)
+      return
+    }
+
+    // Ensure the frame height never shrinks below the content height
+    // This prevents the scroll view from clamping the scrollable area
+    let lineCount = codeStorageDelegate.lineMap.lines.count
+    let lineHeight = theme.font.lineHeight
+    let estimatedHeight = cachedCodeHeight ?? (CGFloat(lineCount) * lineHeight)
+    let minimumHeight = max(estimatedHeight, enclosingScrollView?.documentVisibleRect.height ?? newSize.height)
+
+    let adjustedSize = NSSize(width: newSize.width, height: max(newSize.height, minimumHeight))
+    super.setFrameSize(adjustedSize)
+  }
+
+  /// Invalidate layout and perform full document layout.
+  /// This ensures all text is laid out, not just the viewport.
+  func invalidateAndRelayoutFullDocument() {
+    guard let textLayoutManager = optTextLayoutManager,
+          let textContainer = optTextContainer
+    else { return }
+
+    // First, update the text container size to match current layout
+    let visibleWidth = enclosingScrollView?.documentVisibleRect.width ?? bounds.width
+    let gutterWidth = gutterView?.frame.width ?? 0
+    let containerWidth = viewLayout.wrapText ? (visibleWidth - gutterWidth) : CGFloat.greatestFiniteMagnitude
+
+    if textContainer.size.width != containerWidth {
+      textContainer.size = CGSize(width: containerWidth, height: CGFloat.greatestFiniteMagnitude)
+    }
+
+    // Invalidate the entire document layout
+    let documentRange = textLayoutManager.documentRange
+    textLayoutManager.invalidateLayout(for: documentRange)
+
+    // Force the text layout manager to process all pending layout
+    textLayoutManager.textViewportLayoutController.layoutViewport()
+
+    // Force layout of the entire document (not just viewport)
+    textLayoutManager.ensureLayout(for: documentRange)
+
+    // Also re-layout the minimap
+    if let minimapLayoutManager = minimapView?.textLayoutManager {
+      let minimapDocumentRange = minimapLayoutManager.documentRange
+      minimapLayoutManager.invalidateLayout(for: minimapDocumentRange)
+      minimapLayoutManager.textViewportLayoutController.layoutViewport()
+      minimapLayoutManager.ensureLayout(for: minimapDocumentRange)
+    }
+
+    // Recalculate cached heights based on actual layout
+    if let actualExtent = textLayoutManager.textLayoutFragmentExtent(for: documentRange) {
+      cachedCodeHeight = actualExtent.height
+
+      // Update frame to match actual content height
+      let minHeight = max(actualExtent.height, enclosingScrollView?.documentVisibleRect.height ?? 0)
+      if frame.size.height != minHeight {
+        super.setFrameSize(NSSize(width: frame.size.width, height: minHeight))
+        minSize = NSSize(width: visibleWidth, height: minHeight)
+      }
+    }
+
+    // Update minimap cached height
+    if let minimapLayoutManager = minimapView?.textLayoutManager,
+       let minimapExtent = minimapLayoutManager.textLayoutFragmentExtent(for: minimapLayoutManager.documentRange) {
+      cachedMinimapHeight = minimapExtent.height
+    }
+
+    // Update minimap position
+    adjustScrollPositionOfMinimap()
+
+    // Force redraw
+    needsDisplay = true
+    minimapView?.needsDisplay = true
+    gutterView?.needsDisplay = true
+  }
+
+  override func viewDidMoveToSuperview() {
+    super.viewDidMoveToSuperview()
+
+    // Set up frame change observer for gutter updates
+    // Full document re-layout is handled by the SwiftUI coordinator with debouncing
+    if frameChangedNotificationObserver == nil, let scrollView = enclosingScrollView {
+      frameChangedNotificationObserver
+        = NotificationCenter.default.addObserver(forName: NSView.frameDidChangeNotification,
+                                                 object: scrollView,
+                                                 queue: .main) { [weak self] _ in
+          // Redraw gutter for line number updates
+          self?.gutterView?.needsDisplay = true
+        }
+    }
   }
 }
 
@@ -1483,14 +1579,34 @@ extension CodeView {
     //     number of characters. Adding the slack to the code view's text container size doesn't work as the line breaks
     //     of the minimap and main code view are then sometimes not entirely in sync.
     let codeContainerWidth = if viewLayout.wrapText { codeViewWidth - gutterWidth } else { CGFloat.greatestFiniteMagnitude }
+
+    // Update height estimator configuration when container width changes (affects word wrap height calculations)
+    if let estimator = heightEstimator {
+      let newConfig = HeightEstimator.Configuration(
+        font: theFont,
+        wrapText: viewLayout.wrapText,
+        containerWidth: codeContainerWidth,
+        minimapRatio: minimapRatio
+      )
+      estimator.updateConfiguration(newConfig)
+    }
+
     if codeContainer.size.width != codeContainerWidth {
       codeContainer.size = CGSize(width: codeContainerWidth, height: CGFloat.greatestFiniteMagnitude)
+      // Container width changed - invalidate and recalculate document heights
+      invalidateDocumentHeightCache()
     }
 
     codeContainer.lineFragmentPadding = lineFragmentPadding
 #if os(macOS)
     if textContainerInset.width != gutterWidth {
       textContainerInset = CGSize(width: gutterWidth, height: 0)
+    }
+    // Set minSize to prevent NSTextView from shrinking below content height
+    // This ensures the scroll view maintains the full scrollable area when the view shrinks
+    let newMinSize = CGSize(width: visibleWidth, height: minimumHeight)
+    if minSize != newMinSize {
+      minSize = newMinSize
     }
     // Ensure frame height matches our calculated height (prevents scroll indicator issues)
     if frame.size.height != minimumHeight {
@@ -1500,9 +1616,11 @@ extension CodeView {
     if textContainerInset.left != gutterWidth {
       textContainerInset = UIEdgeInsets(top: 0, left: gutterWidth, bottom: 0, right: 0)
     }
-    // Ensure frame height matches our calculated height (prevents scroll indicator issues)
-    if frame.size.height != minimumHeight {
-      frame.size.height = minimumHeight
+    // Ensure content size reflects the full document height for proper scrolling
+    // UITextView inherits from UIScrollView, so contentSize determines the scrollable area
+    let newContentSize = CGSize(width: bounds.width, height: minimumHeight)
+    if contentSize != newContentSize {
+      contentSize = newContentSize
     }
 #endif
 
