@@ -619,13 +619,10 @@ extension CodeEditor: UIViewRepresentable {
         (codeView.optCodeStorage?.delegate as? CodeStorageDelegate)?.skipNextChangeNotificationToLanguageService = true
       }
       codeView.text = text
-//      // FIXME: Stupid hack to force redrawing when the language doesn't change. (A language change already forces
-//      // FIXME: redrawing.)
-//      if language == codeView.language {
-//        Task { @MainActor in
-//          codeView.font = theme.font
-//        }
-//      }
+
+      // Perform one-time full document layout to ensure content is visible immediately
+      // and cache the document height for minimap positioning
+      codeView.performFullDocumentLayout()
 
     }
     if codeView.lastMessages != messages { codeView.update(messages: messages) }
@@ -829,13 +826,10 @@ extension CodeEditor: NSViewRepresentable {
         (codeView.optCodeStorage?.delegate as? CodeStorageDelegate)?.skipNextChangeNotificationToLanguageService = true
       }
       codeView.string = text
-      // FIXME: Stupid hack to force redrawing when the language doesn't change. (A language change already forces
-      // FIXME: redrawing.)
-      if language == codeView.language {
-        Task { @MainActor in
-          codeView.font = theme.font
-        }
-      }
+
+      // Perform one-time full document layout to ensure content is visible immediately
+      // and cache the document height for minimap positioning
+      codeView.performFullDocumentLayout()
 
     }
     if codeView.lastMessages != messages { codeView.update(messages: messages) }

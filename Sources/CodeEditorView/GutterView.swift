@@ -169,9 +169,9 @@ extension GutterView {
           let lineMap            = optLineMap
     else { return }
 
-    // We can't draw the gutter without having layout information for the viewport.
+    // NOTE: Removed ensureLayout() call - TextKit 2 already has viewport layout available
+    // We use whatever layout is currently available, which should include the visible viewport
     let viewPortBounds = textLayoutManager.textViewportLayoutController.viewportBounds
-    textLayoutManager.ensureLayout(for: viewPortBounds)
 
     let desc = OSFont.systemFont(ofSize: theme.fontSize).fontDescriptor.addingAttributes(
       [ OSFontDescriptor.AttributeName.featureSettings:

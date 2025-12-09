@@ -310,38 +310,11 @@ final class CodeView: UITextView {
                                                queue: .main){ [weak self] _ in
 
         self?.invalidateDocumentHeightCache()
-        self?.computeDocumentHeightsAsync()
+        // NOTE: Removed computeDocumentHeightsAsync() - heights are set by performFullDocumentLayout()
         self?.invalidateMessageViews(withIDs: self!.codeStorageDelegate.lastInvalidatedMessageIDs)
         self?.gutterView?.invalidateGutter()
         self?.minimapGutterView?.invalidateGutter()
       }
-  }
-
-  /// Asynchronously compute and cache document heights after text changes.
-  /// This avoids blocking scrolling while still providing accurate heights.
-  ///
-  private func computeDocumentHeightsAsync() {
-    Task { @MainActor [weak self] in
-      guard let self = self,
-            let mainTextLayoutManager = self.optTextLayoutManager,
-            let minimapTextLayoutManager = self.minimapView?.textLayoutManager
-      else { return }
-
-      // Yield to let other UI work complete first
-      await Task.yield()
-
-      // Compute main code height
-      mainTextLayoutManager.ensureLayout(for: mainTextLayoutManager.documentRange)
-      if let height = mainTextLayoutManager.textLayoutFragmentExtent(for: mainTextLayoutManager.documentRange)?.height {
-        self.cachedCodeHeight = height
-      }
-
-      // Compute minimap height
-      minimapTextLayoutManager.ensureLayout(for: minimapTextLayoutManager.documentRange)
-      if let height = minimapTextLayoutManager.textLayoutFragmentExtent(for: minimapTextLayoutManager.documentRange)?.height {
-        self.cachedMinimapHeight = height
-      }
-    }
   }
 
   @available(*, unavailable)
@@ -554,32 +527,7 @@ final class CodeView: NSTextView {
     cachedMinimapHeight = nil
   }
 
-  /// Asynchronously compute and cache document heights after text changes.
-  /// This avoids blocking scrolling while still providing accurate heights.
-  ///
-  private func computeDocumentHeightsAsync() {
-    Task { @MainActor [weak self] in
-      guard let self = self,
-            let mainTextLayoutManager = self.optTextLayoutManager,
-            let minimapTextLayoutManager = self.minimapView?.textLayoutManager
-      else { return }
-
-      // Yield to let other UI work complete first
-      await Task.yield()
-
-      // Compute main code height
-      mainTextLayoutManager.ensureLayout(for: mainTextLayoutManager.documentRange)
-      if let height = mainTextLayoutManager.textLayoutFragmentExtent(for: mainTextLayoutManager.documentRange)?.height {
-        self.cachedCodeHeight = height
-      }
-
-      // Compute minimap height
-      minimapTextLayoutManager.ensureLayout(for: minimapTextLayoutManager.documentRange)
-      if let height = minimapTextLayoutManager.textLayoutFragmentExtent(for: minimapTextLayoutManager.documentRange)?.height {
-        self.cachedMinimapHeight = height
-      }
-    }
-  }
+  /// NOTE: Removed computeDocumentHeightsAsync() - heights are now set by performFullDocumentLayout()
 
   /// For the consumption of the diagnostics stream.
   ///
@@ -798,7 +746,7 @@ final class CodeView: NSTextView {
 
 //        self?.infoPopover?.close()
         self?.invalidateDocumentHeightCache()
-        self?.computeDocumentHeightsAsync()
+        // NOTE: Heights will be updated incrementally by TextKit 2 as needed
         self?.considerCompletionFor(range: self!.rangeForUserCompletion)
         self?.invalidateMessageViews(withIDs: self!.codeStorageDelegate.lastInvalidatedMessageIDs)
       }
@@ -1026,7 +974,7 @@ extension CodeView {
   func updateCurrentLineHighlight(for location: NSTextLocation) {
     guard let textLayoutManager = optTextLayoutManager else { return }
 
-    ensureLayout(includingMinimap: false)
+    // NOTE: Removed ensureLayout() call - layout should already be available from TextKit 2
 
     // The current line highlight view needs to be visible if we have an insertion point (and not a selection range).
     currentLineHighlightView?.isHidden = insertionPoint == nil
@@ -1060,7 +1008,7 @@ extension CodeView {
   }
 
   func updateMessageLineHighlights() {
-    ensureLayout(includingMinimap: false)
+    // NOTE: Removed ensureLayout() call - layout should already be available from TextKit 2
 
     for messageView in messageViews {
 
@@ -1100,10 +1048,41 @@ extension CodeView {
       textLayoutManager.ensureLayout(for: textLayoutManager.textViewportLayoutController.viewportBounds)
     }
     if includingMinimap,
-       let textLayoutManager = minimapView?.textLayoutManager 
+       let textLayoutManager = minimapView?.textLayoutManager
     {
       textLayoutManager.ensureLayout(for: textLayoutManager.textViewportLayoutController.viewportBounds)
     }
+  }
+
+  /// Perform ONE-TIME full document layout after text is set.
+  /// This ensures all content is visible immediately and caches the document height.
+  /// Should only be called once after setting text, NOT during scrolling.
+  ///
+  func performFullDocumentLayout() {
+    guard let mainTextLayoutManager = optTextLayoutManager else { return }
+
+    // Layout the entire document for the main view
+    mainTextLayoutManager.ensureLayout(for: mainTextLayoutManager.documentRange)
+
+    // Cache the actual document height
+    if let height = mainTextLayoutManager.textLayoutFragmentExtent(for: mainTextLayoutManager.documentRange)?.height {
+      cachedCodeHeight = height
+    }
+
+    // Layout the entire document for the minimap
+    if let minimapTextLayoutManager = minimapView?.textLayoutManager {
+      minimapTextLayoutManager.ensureLayout(for: minimapTextLayoutManager.documentRange)
+
+      if let height = minimapTextLayoutManager.textLayoutFragmentExtent(for: minimapTextLayoutManager.documentRange)?.height {
+        cachedMinimapHeight = height
+      }
+    }
+
+    // Update current line highlight and message highlights now that layout is complete
+    if let textLocation = optTextContentStorage?.textLocation(for: selectedRange.location) {
+      updateCurrentLineHighlight(for: textLocation)
+    }
+    updateMessageLineHighlights()
   }
 
   /// Position and size the gutter and minimap and set the text container sizes and exclusion paths. Take the current
@@ -1237,11 +1216,9 @@ extension CodeView {
 
     }
 
-    // Only after tiling can we get the correct frame for the highlight views.
-    if let textLocation = optTextContentStorage?.textLocation(for: selectedRange.location) {
-      updateCurrentLineHighlight(for: textLocation)
-    }
-    updateMessageLineHighlights()
+    // NOTE: Removed highlight updates from tile() - these are now only called on selection/message changes
+    // updateCurrentLineHighlight() is called from updateBackgroundFor() when selection changes
+    // updateMessageLineHighlights() is called from update(messages:) when messages change
   }
 
 
@@ -1255,30 +1232,11 @@ extension CodeView {
           optTextLayoutManager != nil
     else { return }
 
-    // Use cached heights to avoid expensive layout calls on every scroll.
-    // Heights are computed once when text changes and cached.
-    let codeHeight: CGFloat
-    let minimapHeight: CGFloat
-
-    if let cached = cachedCodeHeight {
-      codeHeight = cached
-    } else {
-      // Estimate height based on line count - avoid forcing layout
-      let lineCount = CGFloat(codeStorageDelegate.lineMap.lines.count)
-      let estimatedLineHeight: CGFloat = 14.0  // Reasonable default
-      codeHeight = max(lineCount * estimatedLineHeight, documentVisibleRect.height)
-      cachedCodeHeight = codeHeight
-    }
-
-    if let cached = cachedMinimapHeight {
-      minimapHeight = cached
-    } else {
-      // Minimap uses same line count but scaled
-      let lineCount = CGFloat(codeStorageDelegate.lineMap.lines.count)
-      let estimatedLineHeight: CGFloat = 2.0  // Minimap lines are much smaller
-      minimapHeight = max(lineCount * estimatedLineHeight, documentVisibleRect.height)
-      cachedMinimapHeight = minimapHeight
-    }
+    // Use cached heights from performFullDocumentLayout().
+    // If cache is not yet populated, skip minimap positioning.
+    guard let codeHeight = cachedCodeHeight,
+          let minimapHeight = cachedMinimapHeight
+    else { return }
 
     let visibleHeight = documentVisibleRect.size.height
 
