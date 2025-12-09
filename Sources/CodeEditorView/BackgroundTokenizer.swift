@@ -38,13 +38,19 @@ final class BackgroundTokenizer {
   private let batchSize: Int = 20
 
   /// Delay between batches when processing background lines (seconds).
-  private let backgroundDelay: TimeInterval = 0.02
+  private let backgroundDelay: TimeInterval = 0.05
 
   /// Delay between checks when all lines are tokenized (seconds).
-  private let idleDelay: TimeInterval = 0.05
+  private let idleDelay: TimeInterval = 0.1
+
+  /// Delay after user stops typing before resuming tokenization (seconds).
+  private let typingCooldownDelay: TimeInterval = 0.15
 
   /// Buffer size around viewport for pre-tokenization.
   let bufferSize: Int = 50
+
+  /// Timestamp of last edit - used to pause tokenization during active typing.
+  private var lastEditTime: CFAbsoluteTime = 0
 
   // MARK: - Dependencies
 
@@ -119,6 +125,14 @@ final class BackgroundTokenizer {
   /// Mark lines as needing tokenization after an edit.
   func invalidateLines(_ lines: Range<Int>) {
     codeStorageDelegate?.setTokenizationState(.invalidated, for: lines)
+    // Record edit time to pause background tokenization during active typing
+    lastEditTime = CFAbsoluteTimeGetCurrent()
+  }
+
+  /// Notify the tokenizer that an edit occurred. Call this on every text change
+  /// to pause background tokenization during active typing.
+  func notifyEdit() {
+    lastEditTime = CFAbsoluteTimeGetCurrent()
   }
 
   /// Mark all lines as pending (e.g., for initial load or language change).
@@ -139,10 +153,19 @@ final class BackgroundTokenizer {
         continue
       }
 
+      // PERFORMANCE: Pause tokenization during active typing to avoid micro-hangs.
+      // Wait until user has stopped typing for typingCooldownDelay before processing.
+      let timeSinceLastEdit = CFAbsoluteTimeGetCurrent() - lastEditTime
+      if timeSinceLastEdit < typingCooldownDelay {
+        // User is actively typing - wait and check again
+        try? await Task.sleep(for: .milliseconds(Int(typingCooldownDelay * 1000)))
+        continue
+      }
+
       // Use priority viewport if set, otherwise use visible lines
       let effectiveViewport = priorityViewport.isEmpty ? visibleLines : priorityViewport
 
-      // Find untokenized lines, prioritizing viewport
+      // Find untokenized lines, prioritizing viewport (limit scan for performance)
       let pendingLines = findPendingLines(delegate: delegate, viewport: effectiveViewport)
 
       if pendingLines.isEmpty {
@@ -163,22 +186,28 @@ final class BackgroundTokenizer {
       // Yield to keep UI responsive
       await Task.yield()
 
-      // Small delay if processing background lines
-      let processingBackground = batch.allSatisfy { !effectiveViewport.contains($0) }
-      if processingBackground {
-        try? await Task.sleep(for: .milliseconds(Int(backgroundDelay * 1000)))
-      }
+      // Delay between batches to avoid hogging the main thread
+      try? await Task.sleep(for: .milliseconds(Int(backgroundDelay * 1000)))
     }
   }
 
   /// Find pending lines, prioritized by distance from viewport.
+  /// - Note: For performance, we limit the scan to viewport + 2x buffer. Lines outside this
+  ///         range will be picked up in subsequent passes as the viewport moves.
   private func findPendingLines(delegate: CodeStorageDelegate, viewport: Range<Int>) -> [Int] {
     let totalLines = delegate.lineMap.lines.count
+    guard totalLines > 0 else { return [] }
+
+    // PERFORMANCE: Only scan viewport + extended buffer, not the entire document.
+    // This keeps findPendingLines O(buffer) instead of O(document).
+    let extendedBuffer = bufferSize * 2
+    let scanStart = max(0, viewport.lowerBound - extendedBuffer)
+    let scanEnd = min(totalLines, viewport.upperBound + extendedBuffer)
+
     var pending: [(line: Int, priority: Int)] = []
+    pending.reserveCapacity(scanEnd - scanStart)
 
-    for line in 0..<totalLines {
-      guard line < delegate.lineMap.lines.count else { break }
-
+    for line in scanStart..<scanEnd {
       let info = delegate.lineMap.lines[line].info
       guard info?.tokenizationState != .tokenized else { continue }
 
@@ -191,7 +220,7 @@ final class BackgroundTokenizer {
           abs(line - viewport.lowerBound),
           abs(line - viewport.upperBound)
         )
-        priority = distance <= bufferSize ? distance : bufferSize + distance
+        priority = distance
       }
 
       pending.append((line, priority))

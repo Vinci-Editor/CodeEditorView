@@ -95,9 +95,10 @@ final class CodeView: UITextView {
   ///
   private var viewportChangeWorkItem: DispatchWorkItem?
 
-  /// Debounce interval for viewport changes (50ms reduces triggers from 60+ to ~20 per second).
+  /// Debounce interval for viewport changes. 50ms reduces triggers from 60+ to ~20 per second
+  /// during scrolling while being responsive enough for a good experience.
   ///
-  private let viewportChangeDebounceInterval: TimeInterval = 0.016  // ~60fps, minimal debounce
+  private let viewportChangeDebounceInterval: TimeInterval = 0.05
 
   /// Contains the line on which the insertion point was located, the last time the selection range got set (if the
   /// selection was an insertion point at all; i.e., it's length was 0).
@@ -377,6 +378,9 @@ final class CodeView: UITextView {
                                                object: self,
                                                queue: .main){ [weak self] _ in
 
+        // Notify background tokenizer of edit to pause during active typing
+        self?.backgroundTokenizer.notifyEdit()
+
         self?.invalidateDocumentHeightCache()
         // NOTE: Removed computeDocumentHeightsAsync() - heights are set by performFullDocumentLayout()
         self?.invalidateMessageViews(withIDs: self!.codeStorageDelegate.lastInvalidatedMessageIDs)
@@ -516,9 +520,10 @@ final class CodeView: NSTextView {
   ///
   private var viewportChangeWorkItem: DispatchWorkItem?
 
-  /// Debounce interval for viewport changes (50ms reduces triggers from 60+ to ~20 per second).
+  /// Debounce interval for viewport changes. 50ms reduces triggers from 60+ to ~20 per second
+  /// during scrolling while being responsive enough for a good experience.
   ///
-  private let viewportChangeDebounceInterval: TimeInterval = 0.016  // ~60fps, minimal debounce
+  private let viewportChangeDebounceInterval: TimeInterval = 0.05
 
   /// Contains the line on which the insertion point was located, the last time the selection range got set (if the
   /// selection was an insertion point at all; i.e., it's length was 0).
@@ -877,6 +882,9 @@ final class CodeView: NSTextView {
                                                object: self,
                                                queue: .main) { [weak self] _ in
 
+        // Notify background tokenizer of edit to pause during active typing
+        self?.backgroundTokenizer.notifyEdit()
+
 //        self?.infoPopover?.close()
         self?.invalidateDocumentHeightCache()
         // NOTE: Heights will be updated incrementally by TextKit 2 as needed
@@ -1208,6 +1216,24 @@ extension CodeView {
       cachedMinimapHeight = CGFloat(lineCount) * (lineHeight / minimapRatio)
     }
 
+    // PERFORMANCE FIX: Set the text view's frame height directly from the estimate.
+    // This tells the scroll view the correct content size upfront, eliminating
+    // the need to layout the entire document just to know the scroll height.
+    // For monospaced fonts without word wrap, this height is exact.
+    if let estimatedHeight = cachedCodeHeight {
+      let minHeight = max(estimatedHeight, documentVisibleRect.height)
+#if os(iOS) || os(visionOS)
+      if frame.size.height != minHeight {
+        frame.size.height = minHeight
+      }
+#elseif os(macOS)
+      // On macOS, setting frame.height directly tells the enclosing scroll view the content size
+      if frame.size.height != minHeight {
+        setFrameSize(NSSize(width: frame.size.width, height: minHeight))
+      }
+#endif
+    }
+
     // Only layout the visible viewport - NOT the entire document
     let viewportBounds = mainTextLayoutManager.textViewportLayoutController.viewportBounds
     mainTextLayoutManager.ensureLayout(for: viewportBounds)
@@ -1243,8 +1269,12 @@ extension CodeView {
       backgroundTokenizer.setPriorityViewport(predictedViewport)
     }
 
-    // Schedule progressive layout for remaining content in background
-    scheduleProgressiveLayout()
+    // Schedule progressive layout ONLY if word wrap is enabled.
+    // For non-wrapped text, heights are exact and we don't need full-document layout.
+    // TextKit 2's viewport layout controller will handle on-demand layout for visible content.
+    if viewLayout.wrapText {
+      scheduleProgressiveLayout()
+    }
   }
 
   /// Legacy method name for compatibility - calls performInitialLayout
@@ -1254,7 +1284,7 @@ extension CodeView {
   }
 
   /// Schedule progressive background layout after initial viewport render.
-  /// This ensures all content is eventually laid out for accurate navigation.
+  /// Only needed for word-wrapped text to get accurate heights.
   ///
   private func scheduleProgressiveLayout() {
     progressiveLayoutTask?.cancel()

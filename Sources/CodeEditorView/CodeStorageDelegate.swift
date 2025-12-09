@@ -218,9 +218,10 @@ class CodeStorageDelegate: NSObject, NSTextStorageDelegate {
   ///
   private var pendingSetTextWorkItem: DispatchWorkItem?
 
-  /// Debounce interval for setText calls (100ms gives responsive feel while avoiding per-keystroke copies).
+  /// Debounce interval for setText calls. Higher values reduce string copy frequency but delay binding sync.
+  /// 300ms is imperceptible to users while significantly reducing work during rapid typing.
   ///
-  private let setTextDebounceInterval: TimeInterval = 0.1
+  private let setTextDebounceInterval: TimeInterval = 0.3
 
 
   // MARK: Initialisers
@@ -847,17 +848,17 @@ extension CodeStorageDelegate {
           merge(semanticTokens: semanticTokens[i], into: firstLine + i)
         }
 
-        // Request redrawing for those lines
+        // Request redrawing for those lines only - NOT the entire document.
+        // PERFORMANCE: Previous code invalidated the entire document which was extremely expensive.
+        // The rendering attribute validator will be called for the invalidated range, which will
+        // apply the merged semantic tokens correctly.
         if let textStorageObserver = textStorage.textStorageObserver {
           let range = lineMap.charRangeOf(lines: lines)
           textStorageObserver.processEditing(for: textStorage,
                                              edited: .editedAttributes,
                                              range: range,
                                              changeInLength: 0,
-                                             invalidatedRange: NSRange(location: 0, length: textStorage.string.count))
-                                                               // ^^If we don't invalidate the whole text, we
-                                                               // somehow lose highlighting for everything outside
-                                                               // of the invalidated range.
+                                             invalidatedRange: range)
         }
 
       }
