@@ -237,11 +237,12 @@ extension CodeEditor.IndentationConfiguration {
   /// - Returns: A string that realises that indentation.
   ///
   func indentation(for column: Int) -> String {
+    let safeColumn = max(0, column)
     switch preference {
     case .preferSpaces:
-      String(repeating: " ", count: column)
+      return String(repeating: " ", count: safeColumn)
     case .preferTabs:
-      String(repeating: "\t", count: column / tabWidth) + String(repeating: " ", count: column % tabWidth)
+      return String(repeating: "\t", count: safeColumn / tabWidth) + String(repeating: " ", count: safeColumn % tabWidth)
     }
   }
 

@@ -187,6 +187,7 @@ final class CodeView: UITextView {
 
   /// Invalidate and recalculate cached document heights when content changes.
   /// Uses height estimation for instant updates instead of full layout.
+  /// Also updates the frame size to prevent "jelly" scrolling effect.
   ///
   func invalidateDocumentHeightCache() {
     let lineCount = codeStorageDelegate.lineMap.lines.count
@@ -198,6 +199,14 @@ final class CodeView: UITextView {
       let lineHeight = theme.font.lineHeight
       cachedCodeHeight = CGFloat(lineCount) * lineHeight
       cachedMinimapHeight = CGFloat(lineCount) * (lineHeight / minimapRatio)
+    }
+
+    // Update frame size to match estimated height (prevents jelly scrolling)
+    if let estimatedHeight = cachedCodeHeight {
+      let minHeight = max(estimatedHeight, documentVisibleRect.height)
+      if frame.size.height != minHeight {
+        frame.size.height = minHeight
+      }
     }
   }
 
@@ -623,6 +632,7 @@ final class CodeView: NSTextView {
 
   /// Invalidate and recalculate cached document heights when content changes.
   /// Uses height estimation for instant updates instead of full layout.
+  /// Also updates the frame size to prevent "jelly" scrolling effect.
   ///
   func invalidateDocumentHeightCache() {
     let lineCount = codeStorageDelegate.lineMap.lines.count
@@ -634,6 +644,14 @@ final class CodeView: NSTextView {
       let lineHeight = theme.font.lineHeight
       cachedCodeHeight = CGFloat(lineCount) * lineHeight
       cachedMinimapHeight = CGFloat(lineCount) * (lineHeight / minimapRatio)
+    }
+
+    // Update frame size to match estimated height (prevents jelly scrolling)
+    if let estimatedHeight = cachedCodeHeight {
+      let minHeight = max(estimatedHeight, documentVisibleRect.height)
+      if frame.size.height != minHeight {
+        setFrameSize(NSSize(width: frame.size.width, height: minHeight))
+      }
     }
   }
 
@@ -1195,9 +1213,9 @@ extension CodeView {
     }
   }
 
-  /// Perform initial document setup with height estimation and viewport-only layout.
-  /// For monospaced fonts without word wrap, this provides instant render.
-  /// Should only be called once after setting text, NOT during scrolling.
+  /// Perform initial document setup with full document layout.
+  /// All text is laid out immediately so there's no "streaming" effect when scrolling.
+  /// Syntax highlighting is still done progressively in the background.
   ///
   func performInitialLayout() {
     guard let mainTextLayoutManager = optTextLayoutManager else { return }
@@ -1205,7 +1223,7 @@ extension CodeView {
     // Get line count from line map (already computed during text storage update)
     let lineCount = codeStorageDelegate.lineMap.lines.count
 
-    // Use height estimation for instant heights (no full layout needed)
+    // Use height estimation for initial frame size
     if let estimator = heightEstimator {
       cachedCodeHeight = estimator.estimatedHeight(for: lineCount)
       cachedMinimapHeight = estimator.estimatedMinimapHeight(for: lineCount)
@@ -1216,10 +1234,7 @@ extension CodeView {
       cachedMinimapHeight = CGFloat(lineCount) * (lineHeight / minimapRatio)
     }
 
-    // PERFORMANCE FIX: Set the text view's frame height directly from the estimate.
-    // This tells the scroll view the correct content size upfront, eliminating
-    // the need to layout the entire document just to know the scroll height.
-    // For monospaced fonts without word wrap, this height is exact.
+    // Set the text view's frame height from the estimate first
     if let estimatedHeight = cachedCodeHeight {
       let minHeight = max(estimatedHeight, documentVisibleRect.height)
 #if os(iOS) || os(visionOS)
@@ -1227,21 +1242,42 @@ extension CodeView {
         frame.size.height = minHeight
       }
 #elseif os(macOS)
-      // On macOS, setting frame.height directly tells the enclosing scroll view the content size
       if frame.size.height != minHeight {
         setFrameSize(NSSize(width: frame.size.width, height: minHeight))
       }
 #endif
     }
 
-    // Only layout the visible viewport - NOT the entire document
-    let viewportBounds = mainTextLayoutManager.textViewportLayoutController.viewportBounds
-    mainTextLayoutManager.ensureLayout(for: viewportBounds)
+    // Layout the ENTIRE document so all text is immediately visible
+    // This prevents the "streaming" effect when scrolling
+    let documentRange = mainTextLayoutManager.documentRange
+    mainTextLayoutManager.ensureLayout(for: documentRange)
 
-    // Only layout the visible minimap viewport
+    // Layout the entire minimap as well
     if let minimapTextLayoutManager = minimapView?.textLayoutManager {
-      let minimapViewportBounds = minimapTextLayoutManager.textViewportLayoutController.viewportBounds
-      minimapTextLayoutManager.ensureLayout(for: minimapViewportBounds)
+      let minimapDocumentRange = minimapTextLayoutManager.documentRange
+      minimapTextLayoutManager.ensureLayout(for: minimapDocumentRange)
+    }
+
+    // Update cached heights with actual layout measurements (for word wrap accuracy)
+    if let actualExtent = mainTextLayoutManager.textLayoutFragmentExtent(for: documentRange) {
+      cachedCodeHeight = actualExtent.height
+      // Update frame size if actual height differs from estimate
+      let minHeight = max(actualExtent.height, documentVisibleRect.height)
+#if os(iOS) || os(visionOS)
+      if frame.size.height != minHeight {
+        frame.size.height = minHeight
+      }
+#elseif os(macOS)
+      if frame.size.height != minHeight {
+        setFrameSize(NSSize(width: frame.size.width, height: minHeight))
+      }
+#endif
+    }
+
+    if let minimapTextLayoutManager = minimapView?.textLayoutManager,
+       let minimapExtent = minimapTextLayoutManager.textLayoutFragmentExtent(for: minimapTextLayoutManager.documentRange) {
+      cachedMinimapHeight = minimapExtent.height
     }
 
     // Update current line highlight and message highlights
@@ -1250,10 +1286,10 @@ extension CodeView {
     }
     updateMessageLineHighlights()
 
-    // Position the minimap correctly with estimated heights
+    // Position the minimap correctly
     adjustScrollPositionOfMinimap()
 
-    // Trigger tokenization for the visible viewport lines
+    // Trigger tokenization for the visible viewport lines (highlighting is still progressive)
     if let viewportRange = mainTextLayoutManager.textViewportLayoutController.viewportRange,
        let textContentStorage = optTextContentStorage {
       let charRange = textContentStorage.range(for: viewportRange)
@@ -1267,13 +1303,6 @@ extension CodeView {
       let totalLines = codeStorageDelegate.lineMap.lines.count
       let predictedViewport = viewportPredictor.predictedViewport(current: visibleLines, totalLines: totalLines)
       backgroundTokenizer.setPriorityViewport(predictedViewport)
-    }
-
-    // Schedule progressive layout ONLY if word wrap is enabled.
-    // For non-wrapped text, heights are exact and we don't need full-document layout.
-    // TextKit 2's viewport layout controller will handle on-demand layout for visible content.
-    if viewLayout.wrapText {
-      scheduleProgressiveLayout()
     }
   }
 
@@ -1390,7 +1419,9 @@ extension CodeView {
         fontWidth               = theFont.maximumHorizontalAdvancement,  // NB: we deal only with fixed width fonts
         gutterWidthInCharacters = CGFloat(7),
         gutterWidth             = ceil(fontWidth * gutterWidthInCharacters),
-        minimumHeight           = max(contentSize.height, documentVisibleRect.height),
+        // Use cached height from line count (more accurate than contentSize which may lag)
+        estimatedHeight         = cachedCodeHeight ?? (CGFloat(codeStorageDelegate.lineMap.lines.count) * theFont.lineHeight),
+        minimumHeight           = max(estimatedHeight, documentVisibleRect.height),
         gutterSize              = CGSize(width: gutterWidth, height: minimumHeight),
         lineFragmentPadding     = CGFloat(5)
 
@@ -1461,9 +1492,17 @@ extension CodeView {
     if textContainerInset.width != gutterWidth {
       textContainerInset = CGSize(width: gutterWidth, height: 0)
     }
+    // Ensure frame height matches our calculated height (prevents scroll indicator issues)
+    if frame.size.height != minimumHeight {
+      setFrameSize(NSSize(width: frame.size.width, height: minimumHeight))
+    }
 #elseif os(iOS) || os(visionOS)
     if textContainerInset.left != gutterWidth {
       textContainerInset = UIEdgeInsets(top: 0, left: gutterWidth, bottom: 0, right: 0)
+    }
+    // Ensure frame height matches our calculated height (prevents scroll indicator issues)
+    if frame.size.height != minimumHeight {
+      frame.size.height = minimumHeight
     }
 #endif
 

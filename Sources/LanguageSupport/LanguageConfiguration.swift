@@ -577,6 +577,12 @@ extension LanguageConfiguration {
 
   /// Reindents the given string based on the language's scoping rules.
   ///
+  /// This formatter handles:
+  /// - Curly bracket depth for block indentation
+  /// - Method chain continuations (lines starting with `.`)
+  /// - Multi-line expressions (unclosed parentheses/brackets)
+  /// - Consecutive modifiers stay at the same indent level
+  ///
   /// - Parameters:
   ///   - string: The string to reindent.
   ///   - indentWidth: The number of spaces per indentation level.
@@ -587,13 +593,11 @@ extension LanguageConfiguration {
   public func reindent(_ string: String, indentWidth: Int = 2, useTabs: Bool = false, tabWidth: Int = 2) -> String {
     let lines = string.components(separatedBy: .newlines)
     var result: [String] = []
-    var bracketDepth = 0
 
-    // Tokenize the entire string to get bracket information
+    // Tokenize the entire string to get bracket and operator information
     guard let tokeniser = Tokeniser(for: tokenDictionary,
                                     caseInsensitiveReservedIdentifiers: caseInsensitiveReservedIdentifiers)
     else {
-      // If tokeniser creation fails, return original string
       return string
     }
 
@@ -612,38 +616,80 @@ extension LanguageConfiguration {
         }
       }
 
-      currentIndex = lineEnd + 1  // +1 for newline character
+      currentIndex = lineEnd + 1
     }
+
+    // Indent stack: tracks indent levels for nested blocks
+    // Each entry is (contentIndent, closingIndent)
+    var indentStack: [(content: Int, closing: Int)] = [(content: 0, closing: 0)]
+
+    // Track method chain state
+    var chainIndent: Int? = nil  // The indent level for method chains (nil = not in chain)
+    var previousLineClosedStructure = false
+    var previousLineIndent = 0
 
     for (lineIndex, line) in lines.enumerated() {
       let trimmedLine = line.drop(while: { $0 == " " || $0 == "\t" })
 
-      // Calculate depth at start of this line (before any brackets on this line)
-      let depthAtLineStart = bracketDepth
-
-      // Count brackets on this line to update depth for next line
+      // Count all bracket types on this line
       let tokensOnLine = lineTokens[lineIndex]
-      var lineOpenBrackets = 0
-      var lineCloseBrackets = 0
+      var lineCurlyOpen = 0, lineCurlyClose = 0
+      var lineRoundOpen = 0, lineRoundClose = 0
+      var lineSquareOpen = 0, lineSquareClose = 0
 
       for token in tokensOnLine {
-        if token.token == Token.curlyBracketOpen {
-          lineOpenBrackets += 1
-        } else if token.token == Token.curlyBracketClose {
-          lineCloseBrackets += 1
+        switch token.token {
+        case .curlyBracketOpen:   lineCurlyOpen += 1
+        case .curlyBracketClose:  lineCurlyClose += 1
+        case .roundBracketOpen:   lineRoundOpen += 1
+        case .roundBracketClose:  lineRoundClose += 1
+        case .squareBracketOpen:  lineSquareOpen += 1
+        case .squareBracketClose: lineSquareClose += 1
+        default: break
         }
       }
 
-      // For indentation-sensitive languages (like Python), inherit from previous non-empty line
-      let effectiveDepth: Int
+      let baseIndent = indentStack.last?.content ?? 0
+      var thisLineClosedStructure = false
+      var effectiveDepth: Int
+
       if indentationSensitiveScoping {
-        // For indentation-sensitive languages, preserve relative indentation
-        // Just strip existing indent and reapply based on content
-        effectiveDepth = depthAtLineStart
+        effectiveDepth = baseIndent
       } else {
-        // For bracket-based languages, if line starts with closing bracket, dedent first
-        let startsWithCloseBracket = trimmedLine.first == "}"
-        effectiveDepth = startsWithCloseBracket ? max(0, depthAtLineStart - 1) : depthAtLineStart
+        let startsWithCloseCurly = trimmedLine.first == "}"
+        let startsWithCloseRound = trimmedLine.first == ")"
+        let startsWithCloseSquare = trimmedLine.first == "]"
+        let startsWithDot = trimmedLine.hasPrefix(".")
+
+        if startsWithCloseCurly || startsWithCloseRound || startsWithCloseSquare {
+          // Closing bracket - use closing indent and pop stack
+          effectiveDepth = indentStack.last?.closing ?? 0
+          if indentStack.count > 1 {
+            indentStack.removeLast()
+            thisLineClosedStructure = true
+          }
+          // Reset chain when we close a structure
+          chainIndent = nil
+        } else if startsWithDot {
+          // Method chain modifier
+          if previousLineClosedStructure {
+            // After closing `}` or `)`, continue at same level as closing line
+            effectiveDepth = previousLineIndent
+            chainIndent = previousLineIndent
+          } else if let existingChain = chainIndent {
+            // Continue existing chain at same level
+            effectiveDepth = existingChain
+          } else {
+            // Start new chain: base + 1
+            effectiveDepth = baseIndent + 1
+            chainIndent = effectiveDepth
+          }
+        } else {
+          // Regular line - use base indent
+          effectiveDepth = baseIndent
+          // Reset chain since this isn't a modifier line
+          chainIndent = nil
+        }
       }
 
       // Generate indentation string
@@ -656,16 +702,42 @@ extension LanguageConfiguration {
         indentString = String(repeating: " ", count: effectiveDepth * indentWidth)
       }
 
-      // Add reindented line (preserve empty lines without adding indentation)
+      // Add reindented line
       if trimmedLine.isEmpty {
         result.append("")
       } else {
         result.append(indentString + trimmedLine)
       }
 
-      // Update bracket depth for next line
-      bracketDepth += lineOpenBrackets - lineCloseBrackets
-      bracketDepth = max(0, bracketDepth)
+      // Update indent stack for opening brackets on this line
+      for _ in 0..<lineCurlyOpen {
+        indentStack.append((content: effectiveDepth + 1, closing: effectiveDepth))
+      }
+      for _ in 0..<lineRoundOpen {
+        indentStack.append((content: effectiveDepth + 1, closing: effectiveDepth))
+      }
+      for _ in 0..<lineSquareOpen {
+        indentStack.append((content: effectiveDepth + 1, closing: effectiveDepth))
+      }
+
+      // Pop for closing brackets not at start of line
+      let closingCurliesNotAtStart = trimmedLine.first == "}" ? max(0, lineCurlyClose - 1) : lineCurlyClose
+      let closingRoundsNotAtStart = trimmedLine.first == ")" ? max(0, lineRoundClose - 1) : lineRoundClose
+      let closingSquaresNotAtStart = trimmedLine.first == "]" ? max(0, lineSquareClose - 1) : lineSquareClose
+
+      for _ in 0..<closingCurliesNotAtStart {
+        if indentStack.count > 1 { indentStack.removeLast() }
+      }
+      for _ in 0..<closingRoundsNotAtStart {
+        if indentStack.count > 1 { indentStack.removeLast() }
+      }
+      for _ in 0..<closingSquaresNotAtStart {
+        if indentStack.count > 1 { indentStack.removeLast() }
+      }
+
+      // Track state for next line
+      previousLineClosedStructure = thisLineClosedStructure
+      previousLineIndent = effectiveDepth
     }
 
     return result.joined(separator: "\n")
