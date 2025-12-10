@@ -105,6 +105,18 @@ final class CodeView: UITextView {
   ///
   var oldLastLineOfInsertionPoint: Int? = 1
 
+  /// Flag indicating tile() is currently executing - prevents recursive layout cycles.
+  ///
+  private var isTiling: Bool = false
+
+  /// Cached documentVisibleRect to avoid repeated access during layout.
+  ///
+  private var cachedDocumentVisibleRect: CGRect?
+
+  /// Tracks pending layout work that needs to be applied after current layout pass.
+  ///
+  private var hasPendingLayoutWork: Bool = false
+
   /// The current highlighting theme
   ///
   @Invalidating(.layout, .display)
@@ -199,6 +211,13 @@ final class CodeView: UITextView {
       let lineHeight = theme.font.lineHeight
       cachedCodeHeight = CGFloat(lineCount) * lineHeight
       cachedMinimapHeight = CGFloat(lineCount) * (lineHeight / minimapRatio)
+    }
+
+    // Don't modify contentSize during layout - it will be handled by tile()
+    // The cached heights will be picked up by the next layout pass
+    if isTiling {
+      hasPendingLayoutWork = true
+      return
     }
 
     // Update content size to match estimated height (prevents jelly scrolling)
@@ -514,6 +533,18 @@ final class CodeView: NSTextView {
   /// Flag indicating the view is currently being resized - skip expensive operations.
   var isResizing: Bool = false
 
+  /// Flag indicating tile() is currently executing - prevents recursive layout cycles.
+  ///
+  private var isTiling: Bool = false
+
+  /// Cached documentVisibleRect to avoid repeated access during layout.
+  ///
+  private var cachedDocumentVisibleRect: CGRect?
+
+  /// Tracks pending layout work that needs to be applied after current layout pass.
+  ///
+  private var hasPendingLayoutWork: Bool = false
+
   /// Background tokenizer for viewport-based tokenization (replaces old TokenizationCoordinator).
   ///
   private let backgroundTokenizer = BackgroundTokenizer()
@@ -649,6 +680,13 @@ final class CodeView: NSTextView {
       let lineHeight = theme.font.lineHeight
       cachedCodeHeight = CGFloat(lineCount) * lineHeight
       cachedMinimapHeight = CGFloat(lineCount) * (lineHeight / minimapRatio)
+    }
+
+    // Don't call setFrameSize during layout - it will be handled by tile()
+    // The cached heights will be picked up by the next layout pass
+    if isTiling {
+      hasPendingLayoutWork = true
+      return
     }
 
     // Update frame size to match estimated height (prevents jelly scrolling)
@@ -1007,18 +1045,23 @@ final class CodeView: NSTextView {
   }
 
   override func setFrameSize(_ newSize: NSSize) {
-    // During resize, just pass through to avoid expensive calculations
-    if isResizing {
+    // During resize or tiling, just pass through to avoid expensive calculations and recursion
+    if isResizing || isTiling {
       super.setFrameSize(newSize)
       return
     }
+
+    // Use cached documentVisibleRect if available to avoid forcing layout
+    let visibleHeight = cachedDocumentVisibleRect?.height
+                     ?? enclosingScrollView?.documentVisibleRect.height
+                     ?? newSize.height
 
     // Ensure the frame height never shrinks below the content height
     // This prevents the scroll view from clamping the scrollable area
     let lineCount = codeStorageDelegate.lineMap.lines.count
     let lineHeight = theme.font.lineHeight
     let estimatedHeight = cachedCodeHeight ?? (CGFloat(lineCount) * lineHeight)
-    let minimumHeight = max(estimatedHeight, enclosingScrollView?.documentVisibleRect.height ?? newSize.height)
+    let minimumHeight = max(estimatedHeight, visibleHeight)
 
     let adjustedSize = NSSize(width: newSize.width, height: max(newSize.height, minimumHeight))
     super.setFrameSize(adjustedSize)
@@ -1491,6 +1534,33 @@ extension CodeView {
   private func tile() {
     guard let codeContainer = optTextContainer as? CodeContainer else { return }
 
+    // Prevent recursive layout cycles - if we're already tiling, mark pending work and return
+    guard !isTiling else {
+      hasPendingLayoutWork = true
+      return
+    }
+
+    isTiling = true
+    defer {
+      isTiling = false
+      cachedDocumentVisibleRect = nil
+      if hasPendingLayoutWork {
+        hasPendingLayoutWork = false
+        // Defer to next runloop to break recursion chain
+        DispatchQueue.main.async { [weak self] in
+#if os(macOS)
+          self?.needsLayout = true
+#else
+          self?.setNeedsLayout()
+#endif
+        }
+      }
+    }
+
+    // Cache documentVisibleRect once at the start to avoid forcing layout during this method
+    let visibleRect = self.documentVisibleRect
+    cachedDocumentVisibleRect = visibleRect
+
 #if os(macOS)
     // Add the floating views if they are not yet in the view hierachy.
     // NB: Since macOS 14, we need to explicitly set clipping; otherwise, views will draw outside of the bounds of the
@@ -1517,7 +1587,7 @@ extension CodeView {
         gutterWidth             = ceil(fontWidth * gutterWidthInCharacters),
         // Use cached height from line count (more accurate than contentSize which may lag)
         estimatedHeight         = cachedCodeHeight ?? (CGFloat(codeStorageDelegate.lineMap.lines.count) * theFont.lineHeight),
-        minimumHeight           = max(estimatedHeight, documentVisibleRect.height),
+        minimumHeight           = max(estimatedHeight, visibleRect.height),
         gutterSize              = CGSize(width: gutterWidth, height: minimumHeight),
         lineFragmentPadding     = CGFloat(5)
 
@@ -1532,7 +1602,7 @@ extension CodeView {
                                       size: CGSize(width: minimapGutterWidth, height: minimumHeight)).integral,
         minimapExtras        = minimapGutterWidth + dividerWidth,
         gutterWithPadding    = gutterWidth + lineFragmentPadding,
-        visibleWidth         = documentVisibleRect.width,
+        visibleWidth         = visibleRect.width,
         widthWithoutGutters  = if viewLayout.showMinimap { visibleWidth - gutterWithPadding - minimapExtras  }
                                else { visibleWidth - gutterWithPadding },
         compositeFontWidth   = if viewLayout.showMinimap { fontWidth + minimapFontWidth  } else { fontWidth },
@@ -1609,8 +1679,9 @@ extension CodeView {
       minSize = newMinSize
     }
     // Ensure frame height matches our calculated height (prevents scroll indicator issues)
+    // Use super.setFrameSize to avoid triggering the override while tiling
     if frame.size.height != minimumHeight {
-      setFrameSize(NSSize(width: frame.size.width, height: minimumHeight))
+      super.setFrameSize(NSSize(width: frame.size.width, height: minimumHeight))
     }
 #elseif os(iOS) || os(visionOS)
     if textContainerInset.left != gutterWidth {
@@ -1642,7 +1713,7 @@ extension CodeView {
     // updateMessageLineHighlights() is called from update(messages:) when messages change
 
     // Update viewport predictor with scroll position
-    viewportPredictor.update(scrollOffset: documentVisibleRect.origin.y)
+    viewportPredictor.update(scrollOffset: visibleRect.origin.y)
 
     // Notify background tokenizer of viewport changes for deferred tokenization (debounced)
     // This reduces tokenization triggers from 60+ per second during scrolling to ~20
@@ -1692,12 +1763,14 @@ extension CodeView {
           let minimapHeight = cachedMinimapHeight
     else { return }
 
-    let visibleHeight = documentVisibleRect.size.height
+    // Use cached documentVisibleRect if available (set by tile()) to avoid forcing layout
+    let visibleRect = cachedDocumentVisibleRect ?? documentVisibleRect
+    let visibleHeight = visibleRect.size.height
 
 #if os(iOS) || os(visionOS)
     // We need to force the scroll view (superclass of `UITextView`) to accomodate the whole content without scrolling
     // and to extent over the whole visible height. (On macOS, the latter is enforced by setting `minSize` in `tile()`.)
-    let minimapMinimalHeight = max(minimapHeight, documentVisibleRect.height)
+    let minimapMinimalHeight = max(minimapHeight, visibleRect.height)
     if let currentHeight = minimapView?.frame.size.height,
        minimapMinimalHeight > currentHeight
     {
@@ -1711,12 +1784,12 @@ extension CodeView {
     // We box the positioning of the minimap at the top and the bottom of the code view (with the `max` and `min`
     // expessions. This is necessary as the minimap will otherwise be partially cut off by the enclosing clip view.
     // To get Xcode-like behaviour, where the minimap sticks to the top, it being a floating view is not sufficient.
-    let newOriginY = floor(min(max(documentVisibleRect.origin.y * scrollFactor, 0),
+    let newOriginY = floor(min(max(visibleRect.origin.y * scrollFactor, 0),
                                codeHeight - minimapHeight))
     if minimapView?.frame.origin.y != newOriginY { minimapView?.frame.origin.y = newOriginY }  // don't update frames in vain
 
     let heightRatio: CGFloat = if codeHeight <= minimapHeight { 1 } else { minimapHeight / codeHeight }
-    let minimapVisibleY      = documentVisibleRect.origin.y * heightRatio,
+    let minimapVisibleY      = visibleRect.origin.y * heightRatio,
         minimapVisibleHeight = visibleHeight * heightRatio,
         documentVisibleFrame = CGRect(x: 0,
                                       y: minimapVisibleY,

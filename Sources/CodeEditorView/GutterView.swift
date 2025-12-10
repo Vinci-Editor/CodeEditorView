@@ -69,6 +69,23 @@ final class GutterView: OSView {
   ///
   let isMinimapGutter: Bool
 
+  // MARK: - Cached drawing resources (expensive to create, reused across draws)
+
+  /// Cached font for line numbers - recreated only when theme changes.
+  private var cachedFont: OSFont?
+
+  /// Cached text attributes for unselected line numbers.
+  private var cachedTextAttributesDefault: [NSAttributedString.Key: Any]?
+
+  /// Cached text attributes for selected line numbers.
+  private var cachedTextAttributesSelected: [NSAttributedString.Key: Any]?
+
+  /// Last theme font size used for caching - used to detect when cache needs refresh.
+  private var cachedFontSize: CGFloat = 0
+
+  /// Last theme text color used for caching.
+  private var cachedTextColour: OSColor?
+
   /// Create and configure a gutter view for the given text view. The gutter view is transparent, so that we can place
   /// highlight views behind it.
   ///
@@ -163,16 +180,21 @@ extension GutterView {
   // MARK: -
   // MARK: Gutter drawing
 
-  override func draw(_ rect: CGRect) {
-    guard let textLayoutManager  = optTextLayoutManager,
-          let textContentStorage = optTextContentStorage,
-          let lineMap            = optLineMap
-    else { return }
+  /// Updates cached font and text attributes if the theme has changed.
+  /// This is called at the start of draw() to ensure we have valid cached values.
+  private func updateCachedDrawingResourcesIfNeeded() {
+    // Check if we need to recreate cached resources
+    let needsUpdate = cachedFont == nil
+                   || cachedFontSize != theme.fontSize
+                   || cachedTextColour != theme.textColour
 
-    // NOTE: Removed ensureLayout() call - TextKit 2 already has viewport layout available
-    // We use whatever layout is currently available, which should include the visible viewport
-    let viewPortBounds = textLayoutManager.textViewportLayoutController.viewportBounds
+    guard needsUpdate else { return }
 
+    // Cache the current theme values
+    cachedFontSize = theme.fontSize
+    cachedTextColour = theme.textColour
+
+    // Create font with number spacing features (expensive - only do once)
     let desc = OSFont.systemFont(ofSize: theme.fontSize).fontDescriptor.addingAttributes(
       [ OSFontDescriptor.AttributeName.featureSettings:
           [
@@ -192,10 +214,46 @@ extension GutterView {
       ]
     )
     #if os(iOS) || os(visionOS)
-    let font = OSFont(descriptor: desc, size: 0)
+    cachedFont = OSFont(descriptor: desc, size: 0)
     #elseif os(macOS)
-    let font = OSFont(descriptor: desc, size: 0) ?? OSFont.systemFont(ofSize: 0)
+    cachedFont = OSFont(descriptor: desc, size: 0) ?? OSFont.systemFont(ofSize: 0)
     #endif
+
+    // Create text attributes (also expensive - only do once)
+    let lineNumberStyle = NSMutableParagraphStyle()
+    lineNumberStyle.alignment = .right
+    lineNumberStyle.tailIndent = -theme.fontSize / 11
+
+    cachedTextAttributesDefault = [
+      NSAttributedString.Key.font: cachedFont!,
+      .foregroundColor: lineNumberColour,
+      .paragraphStyle: lineNumberStyle,
+      .kern: NSNumber(value: Float(-theme.fontSize / 11))
+    ]
+    cachedTextAttributesSelected = [
+      NSAttributedString.Key.font: cachedFont!,
+      .foregroundColor: theme.textColour,
+      .paragraphStyle: lineNumberStyle,
+      .kern: NSNumber(value: Float(-theme.fontSize / 11))
+    ]
+  }
+
+  override func draw(_ rect: CGRect) {
+    guard let textLayoutManager  = optTextLayoutManager,
+          let textContentStorage = optTextContentStorage,
+          let lineMap            = optLineMap
+    else { return }
+
+    // Update cached drawing resources if theme changed (expensive operations cached)
+    updateCachedDrawingResourcesIfNeeded()
+
+    guard let font = cachedFont,
+          let textAttributesDefault = cachedTextAttributesDefault,
+          let textAttributesSelected = cachedTextAttributesSelected
+    else { return }
+
+    // NOTE: Removed ensureLayout() call - TextKit 2 already has viewport layout available
+    // We use whatever layout is currently available, which should include the visible viewport
 
     let selectedLines = textView?.selectedLines ?? Set(1..<2)
 
@@ -208,19 +266,6 @@ extension GutterView {
     if !isMinimapGutter {
 
       let lineRange = lineMap.linesOf(range: characterRange)
-
-      // Text attributes for the line numbers
-      let lineNumberStyle = NSMutableParagraphStyle()
-      lineNumberStyle.alignment = .right
-      lineNumberStyle.tailIndent = -theme.fontSize / 11
-      let textAttributesDefault  = [NSAttributedString.Key.font: font,
-                                    .foregroundColor: lineNumberColour,
-                                    .paragraphStyle: lineNumberStyle,
-                                    .kern: NSNumber(value: Float(-theme.fontSize / 11))],
-          textAttributesSelected = [NSAttributedString.Key.font: font,
-                                    .foregroundColor: theme.textColour,
-                                    .paragraphStyle: lineNumberStyle,
-                                    .kern: NSNumber(value: Float(-theme.fontSize / 11))]
 
       for line in lineRange {  // NB: These are zero-based line numbers
 
