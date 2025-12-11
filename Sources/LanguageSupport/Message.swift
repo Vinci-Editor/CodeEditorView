@@ -13,12 +13,12 @@ import Foundation
 
 /// A message that can be displayed in a code view.
 ///
-public struct Message {
+public struct Message: Sendable {
 
   /// The various category that a message can be in. The earlier in the enumeration, the higher priority in the sense
   /// that in the one-line view, the colour of the highest priority message will be used.
   ///
-  public enum Category: Equatable, Comparable, CaseIterable {
+  public enum Category: Equatable, Comparable, CaseIterable, Sendable {
 
     /// A message related to live execution (e.g., debugger stepping position).
     ///

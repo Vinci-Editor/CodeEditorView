@@ -161,7 +161,7 @@ extension LineMap<LineInfo> {
 // MARK: -
 // MARK: Delegate class
 
-class CodeStorageDelegate: NSObject, NSTextStorageDelegate {
+class CodeStorageDelegate: NSObject, NSTextStorageDelegate, @unchecked Sendable {
 
   private(set) var language:  LanguageConfiguration
   private      var tokeniser: LanguageConfiguration.Tokeniser?  // cache the tokeniser
@@ -506,8 +506,15 @@ class CodeStorageDelegate: NSObject, NSTextStorageDelegate {
 
     let skipDidChangeDocument = skipNextChangeNotificationToLanguageService
     skipNextChangeNotificationToLanguageService = false
-    Task { [editedRange, delta, lines, weak languageService, weak self] in
-      guard let languageService else { return }
+
+    // Capture references safely for async task
+    nonisolated(unsafe) let unsafeLanguageService = languageService
+    nonisolated(unsafe) let unsafeSelf = self
+    nonisolated(unsafe) let unsafeTextStorage = textStorage
+    let capturedCachedString = cachedString
+
+    Task { @MainActor in
+      guard let languageService = unsafeLanguageService else { return }
 
       do {
         // It is crucial to perform the change notification before requesting semantic tokens.
@@ -521,19 +528,13 @@ class CodeStorageDelegate: NSObject, NSTextStorageDelegate {
       } catch let err {
 
         logger.trace("LSP: Could not deliver document change notification; restarting language service: \(err)")
-        Task {@MainActor [weak languageService] in
-          guard let self,
-                let languageService
-          else { return }
 
-          try await languageService.stop()
-          try await languageService.openDocument(with: cachedString,
-                                                 locationService: self.lineMapLocationConverter)
-        }
-
+        try? await languageService.stop()
+        try? await languageService.openDocument(with: capturedCachedString,
+                                                locationService: unsafeSelf.lineMapLocationConverter)
       }
 
-      await self?.requestSemanticTokens(for: lines, in: textStorage)
+      await unsafeSelf.requestSemanticTokens(for: lines, in: unsafeTextStorage)
     }
 
   }
@@ -548,7 +549,7 @@ extension CodeStorageDelegate {
 
   /// This class serves as a location service on the basis of the line map of an encapsulated storage delegate.
   ///
-  final class LineMapLocationService: LocationService {
+  final class LineMapLocationService: LocationService, @unchecked Sendable {
     private weak var codeStorageDelegate: CodeStorageDelegate?
 
     enum ConversionError: Error {
@@ -841,6 +842,11 @@ extension CodeStorageDelegate {
           logger.trace("Language service returned an array of incorrect length; expected \(lines.count), but got \(semanticTokens.count)")
           return
         }
+
+        // Check if there are any actual semantic tokens to merge
+        // If all arrays are empty, skip the merge and processEditing to avoid unnecessary layout invalidation
+        let hasSemanticTokens = semanticTokens.contains { !$0.isEmpty }
+        guard hasSemanticTokens else { return }
 
         // Merge the semantic tokens into the syntactic tokens per line
         // NB: This function runs on the `MainActor`; hence, no concurrent write access to the line map.

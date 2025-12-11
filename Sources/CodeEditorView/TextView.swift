@@ -199,7 +199,7 @@ import UIKit
 private let highlightingAttributes = [NSAttributedString.Key.foregroundColor: UIColor.black,
                                       NSAttributedString.Key.backgroundColor: UIColor.yellow]
 
-extension UITextView: TextView {
+extension UITextView: @preconcurrency TextView {
   typealias Color = UIColor
   typealias Font  = UIFont
 
@@ -271,7 +271,7 @@ extension UITextView: TextView {
 
 import AppKit
 
-extension NSTextView: TextView {
+extension NSTextView: @preconcurrency TextView {
   typealias Color = NSColor
   typealias Font  = NSFont
 

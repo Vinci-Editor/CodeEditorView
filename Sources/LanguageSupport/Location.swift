@@ -16,7 +16,7 @@ import System
 /// Location in a text in terms of a line-column position, with support to use the line and column counts starting from
 /// 0 or 1. The former is more convenient internally and the latter is better for user-facing information.
 ///
-public struct TextLocation {
+public struct TextLocation: Sendable {
 
   /// The line of the location, starting from 0.
   ///
@@ -59,14 +59,14 @@ public struct TextLocation {
 
 /// Protocol for a service converting between index positions of a string and text locations in line-column format.
 ///
-public protocol LocationConverter {
+public protocol LocationConverter: Sendable {
   func textLocation(from location: Int) -> Result<TextLocation, Error>
   func location(from textLocation: TextLocation) -> Result<Int, Error>
 }
 
 /// Generic text location attribute.
 ///
-public struct TextLocated<Entity> {
+public struct TextLocated<Entity: Sendable>: Sendable {
   public let location: TextLocation
   public var entity:   Entity
 

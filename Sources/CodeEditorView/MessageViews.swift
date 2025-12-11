@@ -475,13 +475,13 @@ extension StatefulMessageView {
 // MARK: -
 // MARK: Previews
 
-let message1 = Message(category: .error, length: 1, summary: "It's wrong!", description: nil),
-    message2 = Message(category: .error, length: 1, summary: "Need to fix this.", description: nil),
-    message3 = Message(category: .warning, length: 1, summary: "Looks dodgy.",
-                       description: AttributedString("This doesn't seem right and also totally unclear " +
-                                                        "what it is supposed to do.")),
-    message4 = Message(category: .live, length: 1, summary: "Thread 1", description: nil),
-    message5 = Message(category: .informational, length: 1, summary: "Cool stuff!", description: nil)
+nonisolated(unsafe) let message1 = Message(category: .error, length: 1, summary: "It's wrong!", description: nil)
+nonisolated(unsafe) let message2 = Message(category: .error, length: 1, summary: "Need to fix this.", description: nil)
+nonisolated(unsafe) let message3 = Message(category: .warning, length: 1, summary: "Looks dodgy.",
+                                           description: AttributedString("This doesn't seem right and also totally unclear " +
+                                                                            "what it is supposed to do."))
+nonisolated(unsafe) let message4 = Message(category: .live, length: 1, summary: "Thread 1", description: nil)
+nonisolated(unsafe) let message5 = Message(category: .informational, length: 1, summary: "Cool stuff!", description: nil)
 
 struct MessageViewPreview: View {
   let messages:    [Message]

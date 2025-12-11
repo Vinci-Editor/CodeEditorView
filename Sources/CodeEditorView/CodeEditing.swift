@@ -51,7 +51,7 @@ public struct CodeEditingCommands: Commands {
   }
 }
 
-private func send(_ action: Selector) {
+@MainActor private func send(_ action: Selector) {
 #if os(macOS)
   NSApplication.shared.sendAction(action, to: nil, from: nil)
 #elseif os(iOS) || os(visionOS)
@@ -117,7 +117,7 @@ public struct CodeEditingCommandsView: View {
   func commentSelection(_ sender: Any?)
 }
 
-extension CodeView: CodeEditorActions {
+extension CodeView: @preconcurrency CodeEditorActions {
 
 #if os(macOS)
   @objc public func duplicate(_ sender: Any?) { duplicate() }
@@ -139,6 +139,11 @@ extension CodeView {
 
   override public func keyDown(with event: NSEvent) {
 
+    // Forward relevant events to completion panel if visible
+    if completionPanel.isVisible && completionPanel.handleKeyEvent(event) {
+      return
+    }
+
     let noModifiers = event.modifierFlags.intersection([.shift, .control, .option, .command]) == []
     if event.keyCode == keyCodeTab && noModifiers {
       insertTab()
@@ -152,9 +157,28 @@ extension CodeView {
 #elseif os(iOS) || os(visionOS)
 
   override var keyCommands: [UIKeyCommand]? {
-    [ UIKeyCommand(input: "\t", modifierFlags: [], action: #selector(insertTab)),
-      UIKeyCommand(input: "\r", modifierFlags: [], action: #selector(insertReturnCommand))
-    ]
+    var commands: [UIKeyCommand] = []
+
+    // Completion navigation commands (when completion is visible)
+    if isCompletionVisible {
+      // Arrow up/down for navigation
+      commands.append(UIKeyCommand(input: UIKeyCommand.inputUpArrow, modifierFlags: [], action: #selector(completionSelectPrevious)))
+      commands.append(UIKeyCommand(input: UIKeyCommand.inputDownArrow, modifierFlags: [], action: #selector(completionSelectNext)))
+      // Tab or Return to commit
+      commands.append(UIKeyCommand(input: "\t", modifierFlags: [], action: #selector(completionCommit)))
+      commands.append(UIKeyCommand(input: "\r", modifierFlags: [], action: #selector(completionCommit)))
+      // Escape to cancel
+      commands.append(UIKeyCommand(input: UIKeyCommand.inputEscape, modifierFlags: [], action: #selector(completionCancel)))
+    } else {
+      // Default tab/return handling when completion is not visible
+      commands.append(UIKeyCommand(input: "\t", modifierFlags: [], action: #selector(insertTab)))
+      commands.append(UIKeyCommand(input: "\r", modifierFlags: [], action: #selector(insertReturnCommand)))
+    }
+
+    // Ctrl+Space to trigger completion (always available)
+    commands.append(UIKeyCommand(input: " ", modifierFlags: .control, action: #selector(triggerCompletion)))
+
+    return commands
   }
 
   @objc func insertReturnCommand() {

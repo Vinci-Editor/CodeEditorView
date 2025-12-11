@@ -14,7 +14,7 @@
 //
 //  Curent support here is only for the first stage.
 
-import RegexBuilder
+@preconcurrency import RegexBuilder
 import os
 import SwiftTreeSitter
 #if os(iOS) || os(visionOS)
@@ -29,7 +29,7 @@ private let logger = Logger(subsystem: "org.justtesting.CodeEditorView", categor
 
 /// Specifies the language-dependent aspects of a code editor.
 ///
-public struct LanguageConfiguration {
+public struct LanguageConfiguration: @unchecked Sendable {
 
   /// The various categories of types.
   ///
@@ -363,7 +363,7 @@ extension LanguageConfiguration {
 
   /// Empty language configuration
   ///
-  public static let none = LanguageConfiguration(name: "Text",
+  nonisolated(unsafe) public static let none = LanguageConfiguration(name: "Text",
                                                  supportsSquareBrackets: false,
                                                  supportsCurlyBrackets: false,
                                                  stringRegex: nil,
@@ -381,22 +381,22 @@ extension LanguageConfiguration {
 extension LanguageConfiguration {
 
   // General purpose numeric literals
-  public static let binaryLit: Regex<Substring>   = /(?:[01]_*)+/
-  public static let octalLit: Regex<Substring>    = /(?:[0-7]_*)+/
-  public static let decimalLit: Regex<Substring>  = /(?:[0-9]_*)+/
-  public static let hexalLit: Regex<Substring>    = /(?:[0-9A-Fa-f]_*)+/
-  public static let optNegation: Regex<Substring> = /(?:\B-|\b)/
-  public static let exponentLit: Regex<Substring> = Regex {
+  nonisolated(unsafe) public static let binaryLit: Regex<Substring>   = /(?:[01]_*)+/
+  nonisolated(unsafe) public static let octalLit: Regex<Substring>    = /(?:[0-7]_*)+/
+  nonisolated(unsafe) public static let decimalLit: Regex<Substring>  = /(?:[0-9]_*)+/
+  nonisolated(unsafe) public static let hexalLit: Regex<Substring>    = /(?:[0-9A-Fa-f]_*)+/
+  nonisolated(unsafe) public static let optNegation: Regex<Substring> = /(?:\B-|\b)/
+  nonisolated(unsafe) public static let exponentLit: Regex<Substring> = Regex {
     /[eE](?:[+-])?/
     decimalLit
   }
-  public static let hexponentLit: Regex<Substring> = Regex {
+  nonisolated(unsafe) public static let hexponentLit: Regex<Substring> = Regex {
     /[pP](?:[+-])?/
     decimalLit
   }
 
   // Identifier components following the Swift 5.10 reference
-  public static let identifierHeadCharacters: CharacterClass
+  nonisolated(unsafe) public static let identifierHeadCharacters: CharacterClass
   = CharacterClass("a"..."z",
                    "A"..."Z",
                    .anyOf("_"),
@@ -414,13 +414,13 @@ extension LanguageConfiguration {
                    .anyOf("\u{50000}–\u{5FFFD}\u{60000}–\u{6FFFD}\u{70000}–\u{7FFFD}\u{80000}–\u{8FFFD}"),
                    .anyOf("\u{90000}–\u{9FFFD}\u{A0000}–\u{AFFFD}\u{B0000}–\u{BFFFD}\u{C0000}–\u{CFFFD}"),
                    .anyOf("\u{D0000}–\u{DFFFD}\u{E0000}–\u{EFFFD}"))
-  public static let identifierCharacters
+  nonisolated(unsafe) public static let identifierCharacters: CharacterClass
   = CharacterClass(identifierHeadCharacters,
                    "0"..."9",
                    .anyOf("\u{300}–\u{36F}\u{1DC0}–\u{1DFF}\u{20D0}–\u{20FF}\u{FE20}–\u{FE2F}"))
 
   // Operator components following the Swift 5.10 reference
-  public static let operatorHeadCharacters: CharacterClass
+  nonisolated(unsafe) public static let operatorHeadCharacters: CharacterClass
   = CharacterClass(.anyOf("/=-+!*%<>&|^~?"),
                    .anyOf("\u{A1}–\u{A7}"),
                    .anyOf("\u{A9}\u{AB}"),
@@ -439,7 +439,7 @@ extension LanguageConfiguration {
                    .anyOf("\u{3001}–\u{3003}"),
                    .anyOf("\u{3008}–\u{3020}"),
                    .anyOf("\u{3030}"))
-  public static let operatorCharacters: CharacterClass
+  nonisolated(unsafe) public static let operatorCharacters: CharacterClass
   = CharacterClass(operatorHeadCharacters,
                    .anyOf("\u{0300}–\u{036F}"),
                    .anyOf("\u{1DC0}–\u{1DFF}"),

@@ -206,7 +206,7 @@ extension CodeEditor {
 
   /// Specification of the editor layout.
   ///
-  public struct LayoutConfiguration: Equatable, RawRepresentable {
+  public struct LayoutConfiguration: Equatable, RawRepresentable, Sendable {
 
     /// Show the minimap.
     ///
@@ -255,7 +255,7 @@ extension CodeEditor {
 
   /// Configuration for automatic brace completion behavior.
   ///
-  public struct AutoBraceConfiguration: Equatable {
+  public struct AutoBraceConfiguration: Equatable, Sendable {
 
     /// Whether to automatically insert a closing brace and newline when pressing Enter after `{`.
     ///
@@ -280,9 +280,9 @@ extension EnvironmentValues {
 
 extension CodeEditor {
 
-  public struct IndentationConfiguration: Equatable, RawRepresentable {
+  public struct IndentationConfiguration: Equatable, RawRepresentable, Sendable {
 
-    public enum Preference: Equatable {
+    public enum Preference: Equatable, Sendable {
       case preferSpaces
       case preferTabs
 
@@ -302,7 +302,7 @@ extension CodeEditor {
       }
     }
 
-    public enum TabKey: Equatable {
+    public enum TabKey: Equatable, Sendable {
       case identsInWhitespace
       case indentsAlways
       case insertsTab
@@ -420,10 +420,10 @@ extension CodeEditor {
 
 extension CodeEditor {
 
-  public struct SetActions {
+  public struct SetActions: @unchecked Sendable {
     let setActions: (Actions) -> Void
 
-    public static let ignore: SetActions = .init({ _ in })
+    nonisolated(unsafe) public static let ignore: SetActions = .init({ _ in })
 
     public init(_ setActions: @escaping (Actions) -> Void) {
       self.setActions = setActions
@@ -513,10 +513,10 @@ extension CodeEditor {
 
 extension CodeEditor {
 
-  public struct SetInfo {
+  public struct SetInfo: @unchecked Sendable {
     let setInfo: (Info) -> Void
 
-    public static let ignore: SetInfo = .init({ _ in })
+    nonisolated(unsafe) public static let ignore: SetInfo = .init({ _ in })
 
     public init(_ setInfo: @escaping (Info) -> Void) {
       self.setInfo = setInfo
@@ -772,11 +772,16 @@ extension CodeEditor: NSViewRepresentable {
     context.coordinator.boundsChangedNotificationObserver
       = NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification,
                                                object: scrollView.contentView,
-                                               queue: .main){ [weak scrollView] _ in
+                                               queue: .main){ [weak scrollView, weak codeView] _ in
 
           // FIXME: we would like to get less fine-grained updates here, but `NSScrollView.didEndLiveScrollNotification` doesn't happen when moving the cursor around
           if let scrollView {
             context.coordinator.scrollPositionDidChange(scrollView)
+          }
+
+          // Dismiss completion panel on scroll
+          if let codeView, codeView.completionPanel.isVisible {
+            codeView.completionPanel.close()
           }
         }
 
@@ -975,7 +980,7 @@ extension CodeEditor: NSViewRepresentable {
 /// Environment key for the current code editor theme.
 ///
 public struct CodeEditorTheme: EnvironmentKey {
-  public static var defaultValue: Theme = Theme.defaultLight
+  nonisolated(unsafe) public static var defaultValue: Theme = Theme.defaultLight
 }
 
 extension EnvironmentValues {

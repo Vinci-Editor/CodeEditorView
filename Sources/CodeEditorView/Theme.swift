@@ -193,7 +193,7 @@ typealias Themes = [String: Theme]
 
 extension Theme {
 
-  public static var defaultDark: Theme
+  nonisolated(unsafe) public static let defaultDark: Theme
     = Theme(colourScheme: .dark,
             fontName: "SFMono-Medium",
             fontSize: 13.0,
@@ -215,7 +215,7 @@ extension Theme {
             cursorColour: OSColor(red: 1.0, green: 1.0, blue: 1.0, alpha: 1.0),
             invisiblesColour: OSColor(red: 0.33, green: 0.37, blue: 0.42, alpha: 1.0))
 
-  public static var defaultLight: Theme
+  nonisolated(unsafe) public static let defaultLight: Theme
     = Theme(colourScheme: .light,
             fontName: "SFMono-Medium",
             fontSize: 13.0,

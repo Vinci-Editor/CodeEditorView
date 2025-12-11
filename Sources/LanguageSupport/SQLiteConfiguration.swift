@@ -6,7 +6,7 @@
 //
 
 import Foundation
-import RegexBuilder
+@preconcurrency import RegexBuilder
 
 extension LanguageConfiguration {
   
@@ -57,14 +57,14 @@ extension LanguageConfiguration {
   
   // See `sqlite3CtypeMap` in:
   // https://sqlite.org/src/file?name=ext/misc/normalize.c&ci=trunk
-  private static let sqliteIdentifierHeadCharacters: CharacterClass = CharacterClass(
+  nonisolated(unsafe) private static let sqliteIdentifierHeadCharacters: CharacterClass = CharacterClass(
     "a"..."z",
     "A"..."Z",
     .anyOf("_"),
     "\u{80}" ... "\u{10FFFF}"
   )
   
-  private static let sqliteIdentifierCharacters: CharacterClass = CharacterClass(
+  nonisolated(unsafe) private static let sqliteIdentifierCharacters: CharacterClass = CharacterClass(
     sqliteIdentifierHeadCharacters,
     "0"..."9",
     .anyOf("\u{24}")

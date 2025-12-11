@@ -10,6 +10,7 @@
 import os
 import Combine
 import SwiftUI
+@preconcurrency import ObjectiveC
 
 import Rearrange
 
@@ -74,6 +75,14 @@ final class CodeView: UITextView {
 
   // Notification observer
   private var textDidChangeObserver: NSObjectProtocol?
+
+  /// For the consumption of the diagnostics stream.
+  ///
+  private var diagnosticsCancellable: Cancellable?
+
+  /// For the consumption of the events stream from the language service.
+  ///
+  private var eventsCancellable: Cancellable?
 
   /// Background tokenizer for viewport-based tokenization (replaces old TokenizationCoordinator).
   ///
@@ -141,17 +150,27 @@ final class CodeView: UITextView {
   @Invalidating(.layout, .display)
   var language: LanguageConfiguration = .none {
     didSet {
-      if let codeStorage = optCodeStorage,
-         oldValue.name != language.name || (oldValue.languageService != nil) != (language.languageService != nil)
-      {
+      guard let codeStorage = optCodeStorage else { return }
+
+      if oldValue != language {
+
         Task { @MainActor in
-          try await codeStorageDelegate.change(language: language, for: codeStorage)
+          do {
+
+            try await codeStorageDelegate.change(language: language, for: codeStorage)
+            try await startLanguageService()
+
+          } catch let error {
+            logger.trace("Failed to change language from \(oldValue.name) to \(self.language.name): \(error.localizedDescription)")
+          }
+
           // FIXME: This is an awful kludge to get the code view to redraw with the new highlighting. Emitting
           //        `codeStorage.edited(:range:changeInLength)` doesn't seem to work reliably.
           Task { @MainActor in
             font = theme.font
           }
         }
+
       }
     }
   }
@@ -413,10 +432,48 @@ final class CodeView: UITextView {
 
         self?.invalidateDocumentHeightCache()
         // NOTE: Removed computeDocumentHeightsAsync() - heights are set by performFullDocumentLayout()
+        self?.considerCompletionFor(range: self!.rangeForUserCompletion)
         self?.invalidateMessageViews(withIDs: self!.codeStorageDelegate.lastInvalidatedMessageIDs)
         self?.gutterView?.invalidateGutter()
         self?.minimapGutterView?.invalidateGutter()
       }
+
+    Task {
+      do {
+        try await startLanguageService()
+      } catch let error {
+        logger.trace("Failed to start language service for \(language.name): \(error.localizedDescription)")
+      }
+    }
+  }
+
+  /// Try to activate the language service for the currently configured language.
+  ///
+  func startLanguageService() async throws {
+    diagnosticsCancellable = nil
+    eventsCancellable      = nil
+
+    if let languageService = codeStorageDelegate.languageService {
+
+      try await languageService.openDocument(with: textStorage.string,
+                                             locationService: codeStorageDelegate.lineMapLocationConverter)
+
+      // Report diagnostic messages as they come in.
+      diagnosticsCancellable = languageService.diagnostics
+        .receive(on: DispatchQueue.main)
+        .sink { [weak self] messages in
+
+          self?.setMessages(messages)
+          self?.update(messages: messages)
+        }
+
+      eventsCancellable = languageService.events
+        .receive(on: DispatchQueue.main)
+        .sink { [weak self] event in
+
+          self?.process(event: event)
+        }
+    }
   }
 
   @available(*, unavailable)
@@ -463,6 +520,11 @@ final class CodeViewDelegate: NSObject, UITextViewDelegate {
   func textViewDidChangeSelection(_ textView: UITextView) {
     guard let codeView = textView as? CodeView else { return }
 
+    // Close completion overlay when selection changes (user tapped or moved cursor)
+    if codeView.isCompletionVisible {
+      codeView.dismissCompletion()
+    }
+
     selectionDidChange?(textView)
 
     codeView.updateBackgroundFor(oldSelection: oldSelectedRange, newSelection: codeView.selectedRange)
@@ -471,6 +533,11 @@ final class CodeViewDelegate: NSObject, UITextViewDelegate {
 
   func scrollViewDidScroll(_ scrollView: UIScrollView) {
     guard let codeView = scrollView as? CodeView else { return }
+
+    // Dismiss completion overlay on scroll
+    if codeView.isCompletionVisible {
+      codeView.dismissCompletion()
+    }
 
     didScroll?(scrollView)
 
@@ -1184,6 +1251,12 @@ final class CodeViewDelegate: NSObject, NSTextViewDelegate {
 
   func textViewDidChangeSelection(_ notification: Notification) {
     guard let textView = notification.object as? NSTextView else { return }
+
+    // Close completion panel when selection changes (user clicked or moved cursor)
+    // This is only called for selection changes NOT triggered by text insertion
+    if let codeView = textView as? CodeView, codeView.completionPanel.isVisible {
+      codeView.completionPanel.close()
+    }
 
     selectionDidChange?(textView)
   }

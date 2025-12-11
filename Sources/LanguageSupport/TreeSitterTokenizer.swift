@@ -206,7 +206,7 @@ public struct TreeSitterCaptureMappings {
 
   /// Swift language capture mapping.
   ///
-  public static let swift: [String: LanguageConfiguration.Token] = [
+    nonisolated(unsafe) public static let swift: [String: LanguageConfiguration.Token] = [
     // Keywords
     "keyword": .keyword,
     "keyword.function": .keyword,
@@ -255,7 +255,7 @@ public struct TreeSitterCaptureMappings {
 
   /// Python language capture mapping.
   ///
-  public static let python: [String: LanguageConfiguration.Token] = [
+    nonisolated(unsafe) public static let python: [String: LanguageConfiguration.Token] = [
     "keyword": .keyword,
     "string": .string,
     "number": .number,
@@ -270,7 +270,7 @@ public struct TreeSitterCaptureMappings {
 
   /// Haskell language capture mapping.
   ///
-  public static let haskell: [String: LanguageConfiguration.Token] = [
+    nonisolated(unsafe) public static let haskell: [String: LanguageConfiguration.Token] = [
     "keyword": .keyword,
     "string": .string,
     "number": .number,
