@@ -169,23 +169,30 @@ extension CodeStorage {
                                              for: textRange)
       }
 
-      // On-demand tokenization: If lines in this range haven't been tokenized yet, tokenize them now.
-      // This ensures the first render has highlighting instead of waiting for background tokenization.
-      // PERFORMANCE: Limit trailing lines to 5 to prevent cascading through the entire file when
-      // editing inside comments. The background tokenizer will handle the rest asynchronously.
+      // On-demand tokenization: Sync-tokenize only the first few visible lines for instant highlighting.
+      // This ensures the first render has highlighting without blocking on the entire viewport.
+      // PERFORMANCE: Limit to 5 lines max - background tokenizer handles the rest asynchronously.
       let lines = delegate.lineMap.linesContaining(range: range)
+      var syncTokenizedCount = 0
+      let maxSyncLines = 5  // Only sync-tokenize first 5 lines to prevent blocking
+
+      // Pass 1: Ensure visible lines are tokenized (sync tokenize first few)
       for line in lines where line < delegate.lineMap.lines.count {
         let lineInfo = delegate.lineMap.lines[line].info
-        // If info is nil or not tokenized, tokenize this line synchronously
-        if lineInfo == nil || lineInfo?.tokenizationState != .tokenized {
+
+        // If line needs tokenization and we haven't hit our sync limit
+        if (lineInfo == nil || lineInfo?.tokenizationState != .tokenized) && syncTokenizedCount < maxSyncLines {
           if let lineRange = delegate.lineMap.lookup(line: line)?.range {
-            let _ = delegate.tokenise(range: lineRange, in: self, maxTrailingLines: 5)
+            // Use maxTrailingLines: 1 to minimize cascading tokenization
+            let _ = delegate.tokenise(range: lineRange, in: self, maxTrailingLines: 1)
             delegate.setTokenizationState(.tokenized, for: line..<(line + 1))
+            syncTokenizedCount += 1
           }
         }
+        // Lines beyond maxSyncLines will be handled by background tokenizer
       }
 
-      // Now enumerate tokens (should have them from on-demand tokenization above)
+      // Pass 2: Enumerate ALL tokens in range (including just-tokenized ones)
       enumerateTokens(in: range) { lineToken in
 
         if let documentRange = lineToken.range.intersection(range),

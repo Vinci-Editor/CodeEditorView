@@ -33,9 +33,65 @@ let minimapRatio = CGFloat(8)
 class MinimapView: UITextView {
   weak var codeView: CodeView?
 
+  /// Snapshot layer for fast display during resize.
+  /// When resizing, we show a cached snapshot instead of doing expensive TextKit 2 layout.
+  private var snapshotLayer: CALayer?
+
+  /// Whether we're currently showing the snapshot (during resize).
+  private(set) var isShowingSnapshot: Bool = false
+
+  /// Capture a snapshot of the current minimap content.
+  func captureSnapshot() {
+    // Create image from current content
+    let renderer = UIGraphicsImageRenderer(bounds: bounds)
+    let image = renderer.image { context in
+      layer.render(in: context.cgContext)
+    }
+
+    // Create or update snapshot layer
+    if snapshotLayer == nil {
+      let layer = CALayer()
+      layer.contentsGravity = .topLeft
+      layer.contentsScale = window?.screen.scale ?? 2.0
+      snapshotLayer = layer
+    }
+
+    snapshotLayer?.contents = image.cgImage
+    snapshotLayer?.frame = bounds
+  }
+
+  /// Show the cached snapshot (during resize).
+  func showSnapshot() {
+    guard !isShowingSnapshot, let snapshot = snapshotLayer else { return }
+
+    // Add snapshot layer on top
+    layer.addSublayer(snapshot)
+    snapshot.frame = bounds
+
+    isShowingSnapshot = true
+  }
+
+  /// Hide the snapshot and show live text content.
+  func hideSnapshot() {
+    guard isShowingSnapshot else { return }
+
+    snapshotLayer?.removeFromSuperlayer()
+    isShowingSnapshot = false
+  }
+
+  /// Update snapshot layer frame during resize.
+  func updateSnapshotFrame() {
+    if isShowingSnapshot {
+      snapshotLayer?.frame = bounds
+    }
+  }
+
   // Highlight the current line.
   //
   override func draw(_ rect: CGRect) {
+    // Skip drawing if showing snapshot
+    guard !isShowingSnapshot else { return }
+
     super.draw(rect)
 
     let rectWithinBounds = rect.intersection(bounds)
@@ -73,9 +129,69 @@ class MinimapView: UITextView {
 class MinimapView: NSTextView {
   weak var codeView: CodeView?
 
+  /// Snapshot layer for fast display during resize.
+  /// When resizing, we show a cached snapshot instead of doing expensive TextKit 2 layout.
+  private var snapshotLayer: CALayer?
+
+  /// Whether we're currently showing the snapshot (during resize).
+  private(set) var isShowingSnapshot: Bool = false
+
+  /// Capture a snapshot of the current minimap content.
+  func captureSnapshot() {
+    guard let contentView = enclosingScrollView?.contentView else { return }
+
+    // Create bitmap representation of current content
+    let bitmapRep = bitmapImageRepForCachingDisplay(in: bounds)
+    if let rep = bitmapRep {
+      cacheDisplay(in: bounds, to: rep)
+
+      // Create or update snapshot layer
+      if snapshotLayer == nil {
+        let layer = CALayer()
+        layer.contentsGravity = .topLeft
+        layer.contentsScale = window?.backingScaleFactor ?? 2.0
+        snapshotLayer = layer
+      }
+
+      snapshotLayer?.contents = rep.cgImage
+      snapshotLayer?.frame = bounds
+    }
+  }
+
+  /// Show the cached snapshot (during resize).
+  func showSnapshot() {
+    guard !isShowingSnapshot, let snapshot = snapshotLayer else { return }
+
+    // Add snapshot layer on top
+    wantsLayer = true
+    layer?.addSublayer(snapshot)
+    snapshot.frame = bounds
+
+    // Hide text content
+    isShowingSnapshot = true
+  }
+
+  /// Hide the snapshot and show live text content.
+  func hideSnapshot() {
+    guard isShowingSnapshot else { return }
+
+    snapshotLayer?.removeFromSuperlayer()
+    isShowingSnapshot = false
+  }
+
+  /// Update snapshot layer frame during resize.
+  func updateSnapshotFrame() {
+    if isShowingSnapshot {
+      snapshotLayer?.frame = bounds
+    }
+  }
+
   // Highlight the current line.
   //
   override func drawBackground(in rect: NSRect) {
+    // Skip drawing if showing snapshot
+    guard !isShowingSnapshot else { return }
+
     let rectWithinBounds = rect.intersection(bounds)
     super.drawBackground(in: rectWithinBounds)
 
@@ -167,21 +283,25 @@ class MinimapLineFragment: NSTextLineFragment {
   }
 
   // Draw boxes using a character's foreground colour instead of actual glyphs.
+  // PERFORMANCE: Uses Core Graphics directly to avoid OSBezierPath allocation per attribute.
   override func draw(at point: CGPoint, in context: CGContext) {
 
     // Leave some space between glyph boxes on adjacent lines
     let gap = typographicBounds.height * 0.3
+    let rectHeight = typographicBounds.height - gap
+    let yOffset = floor(point.y + gap / 2)
 
     for attribute in attributes {
-
       let attributeRect = CGRect(x: floor(point.x + advancement * CGFloat(attribute.range.location)),
-                                 y: floor(point.y + gap / 2),
+                                 y: yOffset,
                                  width: floor(advancement * CGFloat(attribute.range.length)),
-                                 height: typographicBounds.height - gap)
+                                 height: rectHeight)
+
+      // Use Core Graphics directly - much faster than creating OSBezierPath objects
       if let colour = attribute.attributes[.foregroundColor] as? OSColor {
-        colour.withAlphaComponent(0.50).setFill()
+        context.setFillColor(colour.withAlphaComponent(0.50).cgColor)
       }
-      OSBezierPath(rect: attributeRect).fill()
+      context.fill(attributeRect)
     }
   }
 }

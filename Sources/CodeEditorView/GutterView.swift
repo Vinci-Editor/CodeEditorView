@@ -104,6 +104,13 @@ final class GutterView: OSView {
     super.init(frame: frame)
 #if os(iOS) || os(visionOS)
     isOpaque = false
+    // Enable layer-backed drawing for better scroll performance
+    layer.drawsAsynchronously = true
+#elseif os(macOS)
+    // Enable layer-backed drawing for smoother scrolling
+    wantsLayer = true
+    layer?.drawsAsynchronously = true
+    layerContentsRedrawPolicy = .onSetNeedsDisplay
 #endif
   }
 
@@ -263,47 +270,51 @@ extension GutterView {
         characterRange = textContentStorage.range(for: textRange)
 
     // Draw line numbers unless this is a gutter for a minimap
-    if !isMinimapGutter {
+    guard !isMinimapGutter else { return }
 
-      let lineRange = lineMap.linesOf(range: characterRange)
+    let lineRange = lineMap.linesOf(range: characterRange)
 
-      for line in lineRange {  // NB: These are zero-based line numbers
+    // Pre-compute rect check bounds for faster intersection testing
+    let rectMinY = rect.minY
+    let rectMaxY = rect.maxY
 
-        guard let lineStartLocation  = textContentStorage.textLocation(for: lineMap.lines[line].range.location),
-              let textLayoutFragment = textLayoutManager.textLayoutFragment(for: lineStartLocation)
-        else { continue }
+    for line in lineRange {  // NB: These are zero-based line numbers
 
-        let gutterRect = gutterRectForLineNumbersFrom(textRect: 
-                                                        textLayoutFragment.layoutFragmentFrameWithoutExtraLineFragment),
-           attributes  = selectedLines.contains(line) ? textAttributesSelected : textAttributesDefault
-        if gutterRect.intersects(rect) {
-          ("\(line + 1)" as NSString).draw(in: gutterRect, withAttributes: attributes)
-        }
-      }
+      guard let lineStartLocation  = textContentStorage.textLocation(for: lineMap.lines[line].range.location),
+            let textLayoutFragment = textLayoutManager.textLayoutFragment(for: lineStartLocation)
+      else { continue }
 
-      // If we are at the end, we also draw a line number for the extra line fragement if that exists
-      if lineRange.endIndex == lineMap.lines.count,
-         let endLocation        = textContentStorage.location(textRange.endLocation, offsetBy: -1),
-         let textLayoutFragment = textLayoutManager.textLayoutFragment(for: endLocation),
-         let textRect           = textLayoutFragment.layoutFragmentFrameExtraLineFragment
-      {
+      let gutterRect = gutterRectForLineNumbersFrom(textRect:
+                                                      textLayoutFragment.layoutFragmentFrameWithoutExtraLineFragment)
 
-        let gutterRect = gutterRectForLineNumbersFrom(textRect: textRect),
-            attributes = selectedLines.contains(lineRange.endIndex - 1) ? textAttributesSelected : textAttributesDefault
-        if gutterRect.intersects(rect) {
-          ("\(lineMap.lines.count)" as NSString).draw(in: gutterRect, withAttributes: attributes)
-        }
+      // Fast bounds check instead of full intersects()
+      guard gutterRect.maxY >= rectMinY && gutterRect.minY <= rectMaxY else { continue }
 
-      } else if textRange.isEmpty {  // Empty document (i.e., there is no layout fragment)
-
-        let firstTextRect = CGRect(x: 0, y: 0, width: 0, height: font.lineHeight),
-            gutterRect    = gutterRectForLineNumbersFrom(textRect: firstTextRect)
-        if gutterRect.intersects(rect) {
-          ("\(1)" as NSString).draw(in: gutterRect, withAttributes: textAttributesSelected)
-        }
-      }
+      let attributes = selectedLines.contains(line) ? textAttributesSelected : textAttributesDefault
+      ("\(line + 1)" as NSString).draw(in: gutterRect, withAttributes: attributes)
     }
 
+    // If we are at the end, we also draw a line number for the extra line fragement if that exists
+    if lineRange.endIndex == lineMap.lines.count,
+       let endLocation        = textContentStorage.location(textRange.endLocation, offsetBy: -1),
+       let textLayoutFragment = textLayoutManager.textLayoutFragment(for: endLocation),
+       let textRect           = textLayoutFragment.layoutFragmentFrameExtraLineFragment
+    {
+
+      let gutterRect = gutterRectForLineNumbersFrom(textRect: textRect)
+      if gutterRect.maxY >= rectMinY && gutterRect.minY <= rectMaxY {
+        let attributes = selectedLines.contains(lineRange.endIndex - 1) ? textAttributesSelected : textAttributesDefault
+        ("\(lineMap.lines.count)" as NSString).draw(in: gutterRect, withAttributes: attributes)
+      }
+
+    } else if textRange.isEmpty {  // Empty document (i.e., there is no layout fragment)
+
+      let firstTextRect = CGRect(x: 0, y: 0, width: 0, height: font.lineHeight),
+          gutterRect    = gutterRectForLineNumbersFrom(textRect: firstTextRect)
+      if gutterRect.maxY >= rectMinY && gutterRect.minY <= rectMaxY {
+        ("\(1)" as NSString).draw(in: gutterRect, withAttributes: textAttributesSelected)
+      }
+    }
   }
 }
 

@@ -621,17 +621,19 @@ extension CodeEditor: UIViewRepresentable {
     // When user types, selection updates immediately but text binding is debounced.
     // Without this check, the stale binding would overwrite the codeView's current text.
     let isUserEditing = codeView.isFirstResponder
-    if text != codeView.text && !isUserEditing {
+    if !isUserEditing {
+      // Fast path: check length first (O(1)), only compare content if lengths match
+      let codeViewText = codeView.text
+      let textChanged = text.count != codeViewText.count || text != codeViewText
+      if textChanged {
+        if language.languageService !== codeView.language.languageService {
+          (codeView.optCodeStorage?.delegate as? CodeStorageDelegate)?.skipNextChangeNotificationToLanguageService = true
+        }
+        codeView.text = text
 
-      if language.languageService !== codeView.language.languageService {
-        (codeView.optCodeStorage?.delegate as? CodeStorageDelegate)?.skipNextChangeNotificationToLanguageService = true
+        // Perform viewport layout to ensure content is visible immediately
+        codeView.performInitialLayout()
       }
-      codeView.text = text
-
-      // Perform one-time full document layout to ensure content is visible immediately
-      // and cache the document height for minimap positioning
-      codeView.performFullDocumentLayout()
-
     }
     if codeView.lastMessages != messages { codeView.update(messages: messages) }
     if selection != codeView.selectedRange {
@@ -654,6 +656,33 @@ extension CodeEditor: UIViewRepresentable {
       codeView.language                 = language
       context.coordinator.info.language = language.name
     }
+
+    // Check if view size changed and handle resize optimization
+    // Debounced to avoid lag during continuous resizing (e.g., multitasking, rotation)
+    let currentSize = codeView.frame.size
+    if context.coordinator.lastViewSize != currentSize {
+      context.coordinator.lastViewSize = currentSize
+
+      // Mark as resizing to skip expensive operations
+      context.coordinator.isResizing = true
+      codeView.isResizing = true
+
+      // Update container width immediately for smooth word wrap during resize
+      codeView.updateContainerWidthForResize()
+
+      // Cancel any pending work
+      context.coordinator.resizeEndWorkItem?.cancel()
+
+      // Schedule end of resize detection (50ms after last size change)
+      let resizeEndWork = DispatchWorkItem { [weak codeView] in
+        context.coordinator.isResizing = false
+        codeView?.isResizing = false
+        // Viewport-only relayout after resize ends
+        codeView?.relayoutAfterResize()
+      }
+      context.coordinator.resizeEndWorkItem = resizeEndWork
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: resizeEndWork)
+    }
   }
 
   public func makeCoordinator() -> Coordinator {
@@ -665,6 +694,9 @@ extension CodeEditor: UIViewRepresentable {
   }
 
   public final class Coordinator: _Coordinator {
+    var lastViewSize:       CGSize = .zero
+    var isResizing:         Bool = false
+    var resizeEndWorkItem:  DispatchWorkItem?
 
     // Update of `self.text` happens in `CodeStorageDelegate` — see [Note Propagating text changes into SwiftUI].
     func textDidChange(_ textView: UITextView) { }
@@ -841,17 +873,19 @@ extension CodeEditor: NSViewRepresentable {
     // When user types, selection updates immediately but text binding is debounced.
     // Without this check, the stale binding would overwrite the codeView's current text.
     let isUserEditing = codeView.window?.firstResponder === codeView
-    if text != codeView.string && !isUserEditing {
+    if !isUserEditing {
+      // Fast path: check length first (O(1)), only compare content if lengths match
+      let codeViewText = codeView.string
+      let textChanged = text.count != codeViewText.count || text != codeViewText
+      if textChanged {
+        if language.languageService !== codeView.language.languageService {
+          (codeView.optCodeStorage?.delegate as? CodeStorageDelegate)?.skipNextChangeNotificationToLanguageService = true
+        }
+        codeView.string = text
 
-      if language.languageService !== codeView.language.languageService {
-        (codeView.optCodeStorage?.delegate as? CodeStorageDelegate)?.skipNextChangeNotificationToLanguageService = true
+        // Perform viewport layout to ensure content is visible immediately
+        codeView.performInitialLayout()
       }
-      codeView.string = text
-
-      // Perform one-time full document layout to ensure content is visible immediately
-      // and cache the document height for minimap positioning
-      codeView.performFullDocumentLayout()
-
     }
     if codeView.lastMessages != messages { codeView.update(messages: messages) }
     if selections != codeView.selectedRanges {
@@ -892,8 +926,7 @@ extension CodeEditor: NSViewRepresentable {
       }
     }
 
-    // Check if scroll view size changed and force full document re-layout if needed
-    // This ensures TextKit 2 lays out the entire document when the view resizes
+    // Check if scroll view size changed and handle resize optimization
     // Debounced to avoid lag during continuous window resizing
     let currentSize = scrollView.frame.size
     if context.coordinator.lastScrollViewSize != currentSize {
@@ -903,18 +936,22 @@ extension CodeEditor: NSViewRepresentable {
       context.coordinator.isResizing = true
       codeView.isResizing = true
 
+      // Update container width immediately for smooth word wrap during resize
+      codeView.updateContainerWidthForResize()
+
       // Cancel any pending work
       context.coordinator.relayoutWorkItem?.cancel()
       context.coordinator.resizeEndWorkItem?.cancel()
 
-      // Schedule end of resize detection (200ms after last size change)
+      // Schedule end of resize detection (50ms after last size change)
       let resizeEndWork = DispatchWorkItem { [weak codeView] in
         context.coordinator.isResizing = false
         codeView?.isResizing = false
-        codeView?.invalidateAndRelayoutFullDocument()
+        // Viewport-only relayout after resize ends
+        codeView?.relayoutAfterResize()
       }
       context.coordinator.resizeEndWorkItem = resizeEndWork
-      DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: resizeEndWork)
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: resizeEndWork)
     }
   }
 
