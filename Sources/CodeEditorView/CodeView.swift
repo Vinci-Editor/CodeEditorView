@@ -288,8 +288,18 @@ final class CodeView: UITextView {
       // PERFORMANCE: Skip expensive highlighting work during resize
       guard let self, !self.isResizing else { return }
       guard let textContentStorage = textLayoutManager.textContentManager as? NSTextContentStorage else { return }
-      codeStorage.setHighlightingAttributes(for: textContentStorage.range(for: layoutFragment.rangeInElement),
-                                            in: textLayoutManager)
+
+      let charRange = textContentStorage.range(for: layoutFragment.rangeInElement)
+      codeStorage.setHighlightingAttributes(for: charRange, in: textLayoutManager)
+
+      // Record measured height for word wrap - enables accurate document height estimation
+      if self.viewLayout.wrapText, let estimator = self.heightEstimator {
+        let fragmentHeight = layoutFragment.layoutFragmentFrameWithoutExtraLineFragment.height
+        let lineRange = self.codeStorageDelegate.lineMap.linesContaining(range: charRange)
+        if let firstLine = lineRange.first {
+          estimator.recordMeasuredHeight(fragmentHeight, for: firstLine)
+        }
+      }
     }
 
     // We can't do this — see [Note NSTextViewportLayoutControllerDelegate].
@@ -522,7 +532,7 @@ final class CodeView: UITextView {
   }
 
   /// Lightweight gutter positioning for use during resize.
-  /// Only updates the gutter frame - skips minimap, message views, and other expensive work.
+  /// Only updates frames - skips redraws, minimap layout, message views, and other expensive work.
   private func tileGutterOnly() {
     guard let gutterView else { return }
     let theFont = font ?? OSFont.systemFont(ofSize: 0)
@@ -531,12 +541,66 @@ final class CodeView: UITextView {
     let gutterHeight = max(contentSize.height, bounds.height)
     let gutterFrame = CGRect(x: 0, y: 0, width: gutterWidth, height: gutterHeight)
     if gutterView.frame != gutterFrame { gutterView.frame = gutterFrame }
-    gutterView.setNeedsDisplay()
+    // Skip gutter redraw during resize - will be redrawn in relayoutAfterResize()
+
+    // Update minimap frame position (lightweight - no layout or redraw)
+    if viewLayout.showMinimap {
+      updateMinimapFrameOnly()
+    }
+  }
+
+  /// Update minimap frame position during resize without triggering layout.
+  /// This positions the minimap on the right edge without expensive viewport layout.
+  private func updateMinimapFrameOnly() {
+    guard viewLayout.showMinimap,
+          let minimapView = minimapView
+    else { return }
+
+    let visibleRect = documentVisibleRect
+    let theFont = font ?? OSFont.systemFont(ofSize: 0)
+    let fontWidth = theFont.maximumHorizontalAdvancement
+    let minimapFontWidth = fontWidth / minimapRatio
+    let minimapGutterWidth = ceil(minimapFontWidth * 7)
+    let dividerWidth = CGFloat(1)
+    let gutterWidth = ceil(fontWidth * 7)
+    let lineFragmentPadding = CGFloat(5)
+    let gutterWithPadding = gutterWidth + lineFragmentPadding
+
+    let visibleWidth = visibleRect.width
+    let minimapExtras = minimapGutterWidth + dividerWidth
+    let widthWithoutGutters = visibleWidth - gutterWithPadding - minimapExtras
+    let compositeFontWidth = fontWidth + minimapFontWidth
+    let numberOfCharacters = widthWithoutGutters / compositeFontWidth
+    let codeViewWidth = gutterWithPadding + ceil(numberOfCharacters * fontWidth)
+    let minimapWidth = visibleWidth - codeViewWidth
+    let minimapX = floor(visibleWidth - minimapWidth)
+
+    // Update minimap frame x and width only (lightweight frame update)
+    var newFrame = minimapView.frame
+    if newFrame.origin.x != minimapX || newFrame.width != minimapWidth {
+      newFrame.origin.x = minimapX
+      newFrame.size.width = minimapWidth
+      minimapView.frame = newFrame
+    }
+
+    // Update divider position
+    if let divider = minimapDividerView {
+      let dividerX = minimapX - dividerWidth
+      if divider.frame.origin.x != dividerX {
+        divider.frame.origin.x = dividerX
+      }
+    }
+
+    // Update minimap snapshot frame if showing
+    minimapView.updateSnapshotFrame()
   }
 
   /// Update container width during resize for smooth word wrap.
   /// Called immediately during resize (not just at the end) for smooth visual feedback.
   func updateContainerWidthForResize() {
+    // Skip during resize - changing container size triggers TextKit 2 internal layout
+    // which causes lag. Container will be updated in relayoutAfterResize() instead.
+    guard !isResizing else { return }
     guard let textContainer = optTextContainer else { return }
     let visibleWidth = bounds.width
     // Calculate gutter width from font if not yet laid out
@@ -601,6 +665,12 @@ final class CodeView: UITextView {
 
     // Trigger tile() for gutter positioning - minimap scroll adjustment handled there
     setNeedsLayout()
+
+    // Force gutter redraw now that resize is complete (was skipped during resize)
+    gutterView?.setNeedsDisplay()
+    if viewLayout.showMinimap {
+      minimapGutterView?.setNeedsDisplay()
+    }
   }
 }
 
@@ -933,8 +1003,17 @@ final class CodeView: NSTextView {
       guard let self, !self.isResizing else { return }
       guard let textContentStorage = textLayoutManager.textContentManager as? NSTextContentStorage else { return }
 
-      codeStorage.setHighlightingAttributes(for: textContentStorage.range(for: layoutFragment.rangeInElement),
-                                            in: textLayoutManager)
+      let charRange = textContentStorage.range(for: layoutFragment.rangeInElement)
+      codeStorage.setHighlightingAttributes(for: charRange, in: textLayoutManager)
+
+      // Record measured height for word wrap - enables accurate document height estimation
+      if self.viewLayout.wrapText, let estimator = self.heightEstimator {
+        let fragmentHeight = layoutFragment.layoutFragmentFrameWithoutExtraLineFragment.height
+        let lineRange = self.codeStorageDelegate.lineMap.linesContaining(range: charRange)
+        if let firstLine = lineRange.first {
+          estimator.recordMeasuredHeight(fragmentHeight, for: firstLine)
+        }
+      }
     }.flatMap { observations.append($0) }
 
     // We can't do this — see [Note NSTextViewportLayoutControllerDelegate].
@@ -1237,7 +1316,7 @@ final class CodeView: NSTextView {
   }
 
   /// Lightweight gutter positioning for use during resize.
-  /// Only updates the gutter frame - skips minimap, message views, and other expensive work.
+  /// Only updates frames - skips redraws, minimap layout, message views, and other expensive work.
   private func tileGutterOnly() {
     guard let gutterView else { return }
     let theFont = font ?? OSFont.systemFont(ofSize: 0)
@@ -1246,11 +1325,66 @@ final class CodeView: NSTextView {
     let gutterHeight = max(frame.height, enclosingScrollView?.documentVisibleRect.height ?? 0)
     let gutterFrame = CGRect(x: 0, y: 0, width: gutterWidth, height: gutterHeight)
     if gutterView.frame != gutterFrame { gutterView.frame = gutterFrame }
-    gutterView.needsDisplay = true
+    // Skip gutter redraw during resize - will be redrawn in relayoutAfterResize()
+
+    // Update minimap frame position (lightweight - no layout or redraw)
+    if viewLayout.showMinimap {
+      updateMinimapFrameOnly()
+    }
+  }
+
+  /// Update minimap frame position during resize without triggering layout.
+  /// This positions the minimap on the right edge without expensive viewport layout.
+  private func updateMinimapFrameOnly() {
+    guard viewLayout.showMinimap,
+          let minimapView = minimapView,
+          let scrollView = enclosingScrollView
+    else { return }
+
+    let visibleRect = scrollView.documentVisibleRect
+    let theFont = font ?? OSFont.systemFont(ofSize: 0)
+    let fontWidth = theFont.maximumHorizontalAdvancement
+    let minimapFontWidth = fontWidth / minimapRatio
+    let minimapGutterWidth = ceil(minimapFontWidth * 7)
+    let dividerWidth = CGFloat(1)
+    let gutterWidth = ceil(fontWidth * 7)
+    let lineFragmentPadding = CGFloat(5)
+    let gutterWithPadding = gutterWidth + lineFragmentPadding
+
+    let visibleWidth = visibleRect.width
+    let minimapExtras = minimapGutterWidth + dividerWidth
+    let widthWithoutGutters = visibleWidth - gutterWithPadding - minimapExtras
+    let compositeFontWidth = fontWidth + minimapFontWidth
+    let numberOfCharacters = widthWithoutGutters / compositeFontWidth
+    let codeViewWidth = gutterWithPadding + ceil(numberOfCharacters * fontWidth)
+    let minimapWidth = visibleWidth - codeViewWidth
+    let minimapX = floor(visibleWidth - minimapWidth)
+
+    // Update minimap frame x and width only (lightweight frame update)
+    var newFrame = minimapView.frame
+    if newFrame.origin.x != minimapX || newFrame.width != minimapWidth {
+      newFrame.origin.x = minimapX
+      newFrame.size.width = minimapWidth
+      minimapView.frame = newFrame
+    }
+
+    // Update divider position
+    if let divider = minimapDividerView {
+      let dividerX = minimapX - dividerWidth
+      if divider.frame.origin.x != dividerX {
+        divider.frame.origin.x = dividerX
+      }
+    }
+
+    // Update minimap snapshot frame if showing
+    minimapView.updateSnapshotFrame()
   }
 
   /// Update text container width immediately during resize for smooth word wrap.
   func updateContainerWidthForResize() {
+    // Skip during resize - changing container size triggers TextKit 2 internal layout
+    // which causes lag. Container will be updated in relayoutAfterResize() instead.
+    guard !isResizing else { return }
     guard let textContainer = optTextContainer else { return }
     let visibleWidth = enclosingScrollView?.documentVisibleRect.width ?? bounds.width
     // Calculate gutter width from font if not yet laid out
@@ -1315,10 +1449,19 @@ final class CodeView: NSTextView {
       minimapRatio: minimapRatio
     ))
 
-    // Recalculate heights from line count (instant - no layout needed)
+    // Layout the visible viewport first - this records measured heights for word-wrapped lines
+    // via the renderingAttributesValidator callback
+    textLayoutManager.textViewportLayoutController.layoutViewport()
+
+    // Update minimap viewport if visible
+    if viewLayout.showMinimap, let minimapLayoutManager = minimapView?.textLayoutManager {
+      minimapLayoutManager.textViewportLayoutController.layoutViewport()
+    }
+
+    // Recalculate heights AFTER viewport layout so measurements from visible lines are included
     updateDocumentHeightsFromLineCount()
 
-    // Update frame from estimated height
+    // Update frame from estimated height (now includes measured word-wrap heights)
     if let estimatedHeight = cachedCodeHeight {
       let minHeight = max(estimatedHeight, enclosingScrollView?.documentVisibleRect.height ?? 0)
       if frame.size.height != minHeight {
@@ -1327,16 +1470,14 @@ final class CodeView: NSTextView {
       }
     }
 
-    // Only layout the visible viewport - TextKit 2 handles the rest on-demand
-    textLayoutManager.textViewportLayoutController.layoutViewport()
-
-    // Update minimap viewport if visible
-    if viewLayout.showMinimap, let minimapLayoutManager = minimapView?.textLayoutManager {
-      minimapLayoutManager.textViewportLayoutController.layoutViewport()
-    }
-
     // Trigger layout for gutter positioning - minimap scroll adjustment handled there
     needsLayout = true
+
+    // Force gutter redraw now that resize is complete (was skipped during resize)
+    gutterView?.needsDisplay = true
+    if viewLayout.showMinimap {
+      minimapGutterView?.needsDisplay = true
+    }
   }
 
   override func viewDidMoveToSuperview() {
@@ -1920,6 +2061,26 @@ extension CodeView {
       let totalLines = self.codeStorageDelegate.lineMap.lines.count
       let predictedViewport = self.viewportPredictor.predictedViewport(current: visibleLines, totalLines: totalLines)
       self.backgroundTokenizer.setPriorityViewport(predictedViewport)
+
+      // Update document height when word wrap is enabled
+      // This allows progressive height refinement as the user scrolls and new lines are measured
+      if self.viewLayout.wrapText {
+        self.updateDocumentHeightsFromLineCount()
+        // Update frame if height changed significantly (prevents jitter during scroll)
+        if let estimatedHeight = self.cachedCodeHeight {
+          let currentHeight = self.frame.size.height
+          let minHeight = max(estimatedHeight, self.documentVisibleRect.height)
+          // Only update if difference is significant (more than one line height)
+          if abs(currentHeight - minHeight) > self.theme.font.lineHeight {
+#if os(macOS)
+            self.setFrameSize(NSSize(width: self.frame.size.width, height: minHeight))
+#else
+            self.frame.size.height = minHeight
+            self.contentSize = CGSize(width: self.bounds.width, height: minHeight)
+#endif
+          }
+        }
+      }
     }
     if let workItem = viewportChangeWorkItem {
       DispatchQueue.main.asyncAfter(deadline: .now() + viewportChangeDebounceInterval, execute: workItem)

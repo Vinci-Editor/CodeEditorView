@@ -667,6 +667,12 @@ extension CodeEditor: UIViewRepresentable {
       context.coordinator.isResizing = true
       codeView.isResizing = true
 
+      // Capture and show minimap snapshot at start of resize (fast cached display)
+      if codeView.viewLayout.showMinimap {
+        codeView.minimapView?.captureSnapshot()
+        codeView.minimapView?.showSnapshot()
+      }
+
       // Update container width immediately for smooth word wrap during resize
       codeView.updateContainerWidthForResize()
 
@@ -677,6 +683,10 @@ extension CodeEditor: UIViewRepresentable {
       let resizeEndWork = DispatchWorkItem { [weak codeView] in
         context.coordinator.isResizing = false
         codeView?.isResizing = false
+
+        // Hide minimap snapshot and show live content
+        codeView?.minimapView?.hideSnapshot()
+
         // Viewport-only relayout after resize ends
         codeView?.relayoutAfterResize()
       }
@@ -936,6 +946,12 @@ extension CodeEditor: NSViewRepresentable {
       context.coordinator.isResizing = true
       codeView.isResizing = true
 
+      // Capture and show minimap snapshot at start of resize (fast cached display)
+      if codeView.viewLayout.showMinimap {
+        codeView.minimapView?.captureSnapshot()
+        codeView.minimapView?.showSnapshot()
+      }
+
       // Update container width immediately for smooth word wrap during resize
       codeView.updateContainerWidthForResize()
 
@@ -947,6 +963,10 @@ extension CodeEditor: NSViewRepresentable {
       let resizeEndWork = DispatchWorkItem { [weak codeView] in
         context.coordinator.isResizing = false
         codeView?.isResizing = false
+
+        // Hide minimap snapshot and show live content
+        codeView?.minimapView?.hideSnapshot()
+
         // Viewport-only relayout after resize ends
         codeView?.relayoutAfterResize()
       }
