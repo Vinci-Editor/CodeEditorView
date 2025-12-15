@@ -623,7 +623,7 @@ extension CodeEditor: UIViewRepresentable {
     let isUserEditing = codeView.isFirstResponder
     if !isUserEditing {
       // Fast path: check length first (O(1)), only compare content if lengths match
-      let codeViewText = codeView.text
+      let codeViewText = codeView.text ?? ""
       let textChanged = text.count != codeViewText.count || text != codeViewText
       if textChanged {
         if language.languageService !== codeView.language.languageService {
@@ -1095,3 +1095,4 @@ struct CodeEditor_Previews: PreviewProvider {
                language: .haskell())
   }
 }
+
