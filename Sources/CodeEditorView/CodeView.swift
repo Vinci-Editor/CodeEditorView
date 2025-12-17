@@ -759,26 +759,28 @@ final class CodeView: UITextView {
 
     let visibleWidth = bounds.width
 
-    let desiredContainerWidth: CGFloat = if viewLayout.wrapText {
-      if viewLayout.showMinimap {
-        let minimapFontWidth = fontWidth / minimapRatio
-        let minimapGutterWidth = ceil(minimapFontWidth * 7)
-        let dividerWidth = CGFloat(1)
-        let minimapExtras = minimapGutterWidth + dividerWidth
-        let gutterWithPadding = gutterWidth + lineFragmentPadding
-        let availableWidth = max(CGFloat(0), visibleWidth - gutterWithPadding - minimapExtras)
-        let compositeFontWidth = fontWidth + minimapFontWidth
-        let columns = max(0, Int(floor(availableWidth / compositeFontWidth)))
-        lineFragmentPadding + (CGFloat(columns) * fontWidth)
+    let desiredContainerWidth: CGFloat = {
+      if viewLayout.wrapText {
+        if viewLayout.showMinimap {
+          let minimapFontWidth = fontWidth / minimapRatio
+          let minimapGutterWidth = ceil(minimapFontWidth * 7)
+          let dividerWidth = CGFloat(1)
+          let minimapExtras = minimapGutterWidth + dividerWidth
+          let gutterWithPadding = gutterWidth + lineFragmentPadding
+          let availableWidth = max(CGFloat(0), visibleWidth - gutterWithPadding - minimapExtras)
+          let compositeFontWidth = fontWidth + minimapFontWidth
+          let columns = max(0, Int(floor(availableWidth / compositeFontWidth)))
+          return lineFragmentPadding + (CGFloat(columns) * fontWidth)
+        } else {
+          let gutterWithPadding = gutterWidth + lineFragmentPadding
+          let availableWidth = max(CGFloat(0), visibleWidth - gutterWithPadding)
+          let columns = max(0, Int(floor(availableWidth / fontWidth)))
+          return lineFragmentPadding + (CGFloat(columns) * fontWidth)
+        }
       } else {
-        let gutterWithPadding = gutterWidth + lineFragmentPadding
-        let availableWidth = max(CGFloat(0), visibleWidth - gutterWithPadding)
-        let columns = max(0, Int(floor(availableWidth / fontWidth)))
-        lineFragmentPadding + (CGFloat(columns) * fontWidth)
+        return CGFloat.greatestFiniteMagnitude
       }
-    } else {
-      CGFloat.greatestFiniteMagnitude
-    }
+    }()
 
     guard abs(codeContainer.size.width - desiredContainerWidth) > 0.0001 else { return }
 
@@ -828,26 +830,28 @@ final class CodeView: UITextView {
       codeContainer.lineFragmentPadding = lineFragmentPadding
     }
 
-    let desiredContainerWidth: CGFloat = if viewLayout.wrapText {
-      if viewLayout.showMinimap {
-        let minimapFontWidth = fontWidth / minimapRatio
-        let minimapGutterWidth = ceil(minimapFontWidth * 7)
-        let dividerWidth = CGFloat(1)
-        let minimapExtras = minimapGutterWidth + dividerWidth
-        let gutterWithPadding = gutterWidth + lineFragmentPadding
-        let availableWidth = max(CGFloat(0), visibleWidth - gutterWithPadding - minimapExtras)
-        let compositeFontWidth = fontWidth + minimapFontWidth
-        let columns = max(0, Int(floor(availableWidth / compositeFontWidth)))
-        lineFragmentPadding + (CGFloat(columns) * fontWidth)
+    let desiredContainerWidth: CGFloat = {
+      if viewLayout.wrapText {
+        if viewLayout.showMinimap {
+          let minimapFontWidth = fontWidth / minimapRatio
+          let minimapGutterWidth = ceil(minimapFontWidth * 7)
+          let dividerWidth = CGFloat(1)
+          let minimapExtras = minimapGutterWidth + dividerWidth
+          let gutterWithPadding = gutterWidth + lineFragmentPadding
+          let availableWidth = max(CGFloat(0), visibleWidth - gutterWithPadding - minimapExtras)
+          let compositeFontWidth = fontWidth + minimapFontWidth
+          let columns = max(0, Int(floor(availableWidth / compositeFontWidth)))
+          return lineFragmentPadding + (CGFloat(columns) * fontWidth)
+        } else {
+          let gutterWithPadding = gutterWidth + lineFragmentPadding
+          let availableWidth = max(CGFloat(0), visibleWidth - gutterWithPadding)
+          let columns = max(0, Int(floor(availableWidth / fontWidth)))
+          return lineFragmentPadding + (CGFloat(columns) * fontWidth)
+        }
       } else {
-        let gutterWithPadding = gutterWidth + lineFragmentPadding
-        let availableWidth = max(CGFloat(0), visibleWidth - gutterWithPadding)
-        let columns = max(0, Int(floor(availableWidth / fontWidth)))
-        lineFragmentPadding + (CGFloat(columns) * fontWidth)
+        return CGFloat.greatestFiniteMagnitude
       }
-    } else {
-      CGFloat.greatestFiniteMagnitude
-    }
+    }()
 
     codeContainer.size = CGSize(width: desiredContainerWidth, height: CGFloat.greatestFiniteMagnitude)
     heightEstimator?.updateConfiguration(HeightEstimator.Configuration(
