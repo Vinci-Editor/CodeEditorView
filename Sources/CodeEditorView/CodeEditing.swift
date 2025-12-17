@@ -67,8 +67,10 @@ public struct CodeEditingDuplicateCommandView: View {
 
   public var body: some View {
 
-    Button("Duplicate") {
+    Button {
       send(#selector(CodeEditorActions.duplicate(_:)))
+    } label: {
+      Label("Duplicate", systemImage: "plus.square.on.square")
     }
     .keyboardShortcut("D", modifiers: [.command])
   }
@@ -82,25 +84,33 @@ public struct CodeEditingCommandsView: View {
 
   public var body: some View {
 
-    Button("Re-Indent") {
+    Button {
       send(#selector(CodeEditorActions.reindent(_:)))
+    } label: {
+      Label("Re-Indent", systemImage: "text.alignleft")
     }
     .keyboardShortcut("I", modifiers: [.control])
 
-    Button("Shift Left") {
+    Button {
       send(#selector(CodeEditorActions.shiftLeft(_:)))
+    } label: {
+      Label("Shift Left", systemImage: "decrease.indent")
     }
     .keyboardShortcut("[", modifiers: [.command])
 
-    Button("Shift Right") {
+    Button {
       send(#selector(CodeEditorActions.shiftRight(_:)))
+    } label: {
+      Label("Shift Right", systemImage: "increase.indent")
     }
     .keyboardShortcut("]", modifiers: [.command])
 
     Divider()
 
-    Button("Comment Selection") {
+    Button {
       send(#selector(CodeEditorActions.commentSelection(_:)))
+    } label: {
+      Label("Comment Selection", systemImage: "text.bubble")
     }
     .keyboardShortcut("/", modifiers: [.command])
   }
@@ -600,6 +610,16 @@ extension CodeView {
       return indentation.startOfText(in: codeStorage.string[textRange]) ?? 0
     }
 
+    // Check if a line starts with a closing bracket (for proper dedentation)
+    func lineStartsWithClosingBracket(_ line: Int) -> Bool {
+      guard let lineInfo  = codeStorageDelegate.lineMap.lookup(line: line),
+            let textRange = Range<String.Index>(lineInfo.range, in: codeStorage.string)
+      else { return false }
+      let trimmed = codeStorage.string[textRange].drop(while: { $0 == " " || $0 == "\t" })
+      guard let firstChar = trimmed.first else { return false }
+      return firstChar == "}" || firstChar == ")" || firstChar == "]"
+    }
+
     func predictedIndentation(for line: Int) -> Int {
       if language.indentationSensitiveScoping {
 
@@ -620,7 +640,14 @@ extension CodeView {
 
         // FIXME: Only languages in the C tradition use curly braces for scoping. Needs to be more flexible.
         guard let lineInfo = codeStorageDelegate.lineMap.lookup(line: line) else { return 0 }
-        return (lineInfo.info?.curlyBracketDepthStart ?? 0) * indentation.indentWidth
+        var depth = lineInfo.info?.curlyBracketDepthStart ?? 0
+
+        // Closing brackets should be at parent level (depth - 1)
+        if lineStartsWithClosingBracket(line) && depth > 0 {
+          depth -= 1
+        }
+
+        return depth * indentation.indentWidth
 
       }
     }
@@ -641,20 +668,30 @@ extension CodeView {
 
     } else {
 
-      var newRange = range
-      for line in lines {
+      // Multi-line selection: use language.reindent() for proper relative indentation
+      // This ensures the selection is treated as standalone code and reindented consistently
+      guard let firstLineInfo = codeStorageDelegate.lineMap.lookup(line: firstLine),
+            let lastLine = lines.last,
+            let lastLineInfo = codeStorageDelegate.lineMap.lookup(line: lastLine)
+      else { return range }
 
-        let desiredIndent = predictedIndentation(for: line)
-        guard let currentIndent = currentIndentation(of: line),
-              let lineInfo      = codeStorageDelegate.lineMap.lookup(line: line)
-        else { return newRange }
-        let replacementRange = NSRange(location: lineInfo.range.location, length: currentIndent),
-            indentString     = indentation.indentation(for: desiredIndent)
-        codeStorage.replaceCharacters(in: replacementRange, with: indentString)
-        newRange = newRange.adjustSelection(forReplacing: replacementRange, by: indentString.count)
+      // Get the full range of all affected lines
+      let linesRange = NSRange(location: firstLineInfo.range.location,
+                               length: lastLineInfo.range.location + lastLineInfo.range.length - firstLineInfo.range.location)
 
-      }
-      return newRange
+      guard let stringRange = Range<String.Index>(linesRange, in: codeStorage.string) else { return range }
+
+      let selectedText = String(codeStorage.string[stringRange])
+      let reindentedText = language.reindent(selectedText,
+                                             indentWidth: indentation.indentWidth,
+                                             useTabs: indentation.preference == .preferTabs,
+                                             tabWidth: indentation.tabWidth)
+
+      codeStorage.replaceCharacters(in: linesRange, with: reindentedText)
+
+      // Adjust the selection to account for length change
+      let lengthDiff = reindentedText.utf16.count - linesRange.length
+      return NSRange(location: range.location, length: max(0, range.length + lengthDiff))
 
     }
   }
