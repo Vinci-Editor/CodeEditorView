@@ -28,10 +28,20 @@ let package = Package(
   ],
   targets: [
     .target(
+      name: "TreeSitterSwiftGrammar",
+      path: "Sources/TreeSitterSwiftGrammar",
+      sources: ["src/parser.c"],
+      publicHeadersPath: "include",
+      cSettings: [
+        .headerSearchPath("src"),
+      ]
+    ),
+    .target(
       name: "LanguageSupport",
       dependencies: [
         "Rearrange",
         "SwiftTreeSitter",
+        "TreeSitterSwiftGrammar",
       ],
       swiftSettings: [
         .enableUpcomingFeature("BareSlashRegexLiterals")

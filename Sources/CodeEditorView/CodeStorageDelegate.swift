@@ -167,6 +167,19 @@ class CodeStorageDelegate: NSObject, NSTextStorageDelegate, @unchecked Sendable 
   private      var tokeniser: LanguageConfiguration.Tokeniser?  // cache the tokeniser
   private      var treeSitterTokenizer: TreeSitterTokenizer?    // tree-sitter based tokenizer
 
+  private struct TreeSitterHighlightCache {
+    var lineWindow: Range<Int>
+    var charRange: NSRange
+    var tokens: [LanguageConfiguration.Tokeniser.Token]
+  }
+
+  private static let treeSitterFullDocumentHighlightLineLimit: Int = 2000
+  private static let treeSitterHighlightWindowMinimumLines: Int = 400
+  private static let treeSitterHighlightWindowBufferLines: Int = 120
+  private static let treeSitterHighlightRecenteringMarginLines: Int = 60
+
+  private var treeSitterHighlightCaches: [ObjectIdentifier: TreeSitterHighlightCache] = [:]
+
   /// Language service for this document if available.
   ///
   var languageService: LanguageService? { language.languageService }
@@ -289,6 +302,101 @@ class CodeStorageDelegate: NSObject, NSTextStorageDelegate, @unchecked Sendable 
     return true
   }
 
+  /// Tree-sitter highlight tokens for a document range (viewport highlighting).
+  ///
+  func enumerateTreeSitterHighlightTokens(in range: NSRange,
+                                          viewport: NSRange?,
+                                          layoutManager: NSTextLayoutManager,
+                                          _ body: (LanguageConfiguration.Tokeniser.Token) -> Void) -> Bool {
+    guard let treeSitterTokenizer else { return false }
+
+    let totalLines = lineMap.lines.count
+    let baseRange = viewport ?? range
+
+    func lineWindow(for viewportLines: Range<Int>) -> Range<Int> {
+      if totalLines <= Self.treeSitterFullDocumentHighlightLineLimit {
+        return 0..<totalLines
+      }
+
+      let viewportCount = max(1, viewportLines.count)
+      let windowCount = max(Self.treeSitterHighlightWindowMinimumLines,
+                            viewportCount + (2 * Self.treeSitterHighlightWindowBufferLines))
+      let centerLine = (viewportLines.lowerBound + viewportLines.upperBound) / 2
+      let half = windowCount / 2
+
+      var start = max(0, centerLine - half)
+      var end = min(totalLines, start + windowCount)
+      start = max(0, end - windowCount)
+      return start..<end
+    }
+
+    func shouldRecenter(cache: TreeSitterHighlightCache, viewportLines: Range<Int>) -> Bool {
+      // Always keep a margin so we don't thrash the cache when scrolling one line at a time.
+      let margin = Self.treeSitterHighlightRecenteringMarginLines
+      if cache.lineWindow.count <= (margin * 2) { return false }
+      return viewportLines.lowerBound < cache.lineWindow.lowerBound + margin
+        || viewportLines.upperBound > cache.lineWindow.upperBound - margin
+    }
+
+    func ensureCache(for viewportLines: Range<Int>) -> TreeSitterHighlightCache {
+      let key = ObjectIdentifier(layoutManager)
+      if let existing = treeSitterHighlightCaches[key], !shouldRecenter(cache: existing, viewportLines: viewportLines) {
+        return existing
+      }
+
+      let window = lineWindow(for: viewportLines)
+      let charRange = lineMap.charRangeOf(lines: window)
+      let tokens = treeSitterTokenizer.tokens(in: charRange)
+      let cache = TreeSitterHighlightCache(lineWindow: window, charRange: charRange, tokens: tokens)
+      treeSitterHighlightCaches[key] = cache
+      return cache
+    }
+
+    let viewportLines = lineMap.linesContaining(range: baseRange)
+    let cache = ensureCache(for: viewportLines)
+
+    let tokens = cache.tokens
+    guard !tokens.isEmpty else { return true }
+
+    let start = range.location
+    let end = range.max
+
+    // Binary search for first token whose start is >= range.location.
+    var low = 0
+    var high = tokens.count
+    while low < high {
+      let mid = (low + high) / 2
+      if tokens[mid].range.location < start {
+        low = mid + 1
+      } else {
+        high = mid
+      }
+    }
+
+    var index = max(0, low)
+    while index > 0 && tokens[index - 1].range.max > start {
+      index -= 1
+    }
+
+    while index < tokens.count {
+      let token = tokens[index]
+      if token.range.location >= end { break }
+      if token.range.max > start {
+        body(token)
+      }
+      index += 1
+    }
+
+    return true
+  }
+
+  /// Convenience wrapper that collects highlight tokens into an array.
+  /// Prefer `enumerateTreeSitterHighlightTokens` to avoid per-fragment allocations.
+  func treeSitterHighlightTokens(in range: NSRange) -> [LanguageConfiguration.Tokeniser.Token]? {
+    guard let treeSitterTokenizer else { return nil }
+    return treeSitterTokenizer.tokens(in: range)
+  }
+
 
   // MARK: Updates
 
@@ -325,8 +433,11 @@ class CodeStorageDelegate: NSObject, NSTextStorageDelegate, @unchecked Sendable 
       } else {
         self.treeSitterTokenizer = nil
       }
+      self.treeSitterHighlightCaches.removeAll()
 
       let _ = tokenise(range: NSRange(location: 0, length: codeStorage.length), in: codeStorage)
+      // Ensure tree-sitter is ready for immediate viewport highlighting.
+      self.treeSitterTokenizer?.ensureParsed(codeStorage.string)
 
     }
   }
@@ -355,6 +466,20 @@ class CodeStorageDelegate: NSObject, NSTextStorageDelegate, @unchecked Sendable 
 
     // Cache the text storage string once to avoid multiple expensive copies during this edit pass
     let cachedString = textStorage.string
+
+    // Tree-sitter highlight caches are invalid after any character edit.
+    treeSitterHighlightCaches.removeAll()
+
+    // Keep tree-sitter parse tree in sync with the text storage.
+    // This is incremental for small edits and falls back to a full parse for large replacements.
+    if let treeSitterTokenizer {
+      let isLargeEdit = editedRange.length > 4096 || abs(delta) > 4096
+      if isLargeEdit {
+        treeSitterTokenizer.ensureParsed(cachedString)
+      } else {
+        treeSitterTokenizer.applyEdit(newText: cachedString, editedRange: editedRange, delta: delta)
+      }
+    }
 
     // FIXME: This (and the rest of visual debugging) needs to be rewritten to use rendering attributes.
     if visualDebugging {

@@ -40,6 +40,10 @@ public final class TreeSitterTokenizer {
   ///
   private var lastText: String = ""
 
+  /// Whether we have an initialized parse tree.
+  ///
+  private var isParsed: Bool { tree != nil }
+
   // MARK: - Initialization
 
   /// Creates a tree-sitter tokenizer for a specific language.
@@ -67,78 +71,70 @@ public final class TreeSitterTokenizer {
 
   // MARK: - Parsing
 
-  /// Parse the entire document.
+  /// Ensure the tree is parsed and matches the given text.
   ///
-  /// - Parameter text: The source code to parse.
-  /// - Returns: Array of tokens extracted from the parse tree.
+  /// This does a full parse if we don't have a tree yet or if the text changed without edit metadata.
   ///
-  public func parse(_ text: String) -> [LanguageConfiguration.Tokeniser.Token] {
+  public func ensureParsed(_ text: String) {
+    guard !isParsed || lastText != text else { return }
     tree = parser.parse(text)
     lastText = text
-    return extractTokens(from: tree, in: text)
   }
 
-  /// Parse incrementally after an edit.
+  /// Apply an edit and incrementally update the parse tree.
   ///
-  /// - Parameters:
-  ///   - oldText: The text before the edit.
-  ///   - newText: The text after the edit.
-  ///   - editedRange: The range that was edited (in the old text).
-  ///   - delta: The change in length (positive for insertion, negative for deletion).
-  /// - Returns: Array of tokens extracted from the updated parse tree.
+  /// Tree-sitter bytes are in UTF-16LE for SwiftTreeSitter (2 bytes per UTF-16 code unit).
   ///
-  public func parseIncremental(oldText: String,
-                               newText: String,
-                               editedRange: NSRange,
-                               delta: Int) -> [LanguageConfiguration.Tokeniser.Token] {
-    guard let oldTree = tree else {
-      // No previous tree, do a full parse
-      return parse(newText)
+  public func applyEdit(newText: String, editedRange: NSRange, delta: Int) {
+    guard let existingTree = tree else {
+      ensureParsed(newText)
+      return
     }
 
-    // Create the input edit for tree-sitter
-    let edit = createInputEdit(oldText: oldText, newText: newText, editedRange: editedRange, delta: delta)
-
-    // Apply the edit to the old tree
-    oldTree.edit(edit)
-
-    // Parse with the edited old tree
-    let newTree = parser.parse(tree: oldTree, string: newText)
-    tree = newTree
+    let edit = createInputEdit(oldText: lastText, newText: newText, editedRange: editedRange, delta: delta)
+    existingTree.edit(edit)
+    tree = parser.parse(tree: existingTree, string: newText)
     lastText = newText
-
-    return extractTokens(from: newTree, in: newText)
   }
 
   // MARK: - Token Extraction
 
-  /// Extract tokens from the parse tree using the highlight query.
+  /// Extract tokens using the highlight query.
   ///
-  private func extractTokens(from tree: MutableTree?, in text: String) -> [LanguageConfiguration.Tokeniser.Token] {
-    guard let tree = tree,
+  /// - Parameter range: Optional range to limit captures (viewport highlighting).
+  /// - Returns: Tokens sorted by start location.
+  ///
+  public func tokens(in range: NSRange? = nil) -> [LanguageConfiguration.Tokeniser.Token] {
+    guard let tree,
           tree.rootNode != nil,
           let query = highlightQuery
     else { return [] }
 
-    var tokens: [LanguageConfiguration.Tokeniser.Token] = []
     let cursor = query.execute(in: tree)
+    if let range {
+      cursor.setRange(range)
+    }
 
-    while let match = cursor.next() {
+    let context = Predicate.Context(string: lastText)
+
+    var tokens: [LanguageConfiguration.Tokeniser.Token] = []
+    for match in cursor.resolve(with: context) {
       for capture in match.captures {
-        guard let captureName = query.captureName(for: capture.index),
+        guard let captureName = capture.name,
               let tokenType = captureMapping[captureName]
         else { continue }
 
-        // Get the range from the captured node
-        let nodeRange = capture.node.range
-        let charRange = NSRange(location: nodeRange.location, length: nodeRange.length)
-
-        tokens.append(LanguageConfiguration.Tokeniser.Token(token: tokenType, range: charRange))
+        let captureRange = capture.node.range
+        if let range, (captureRange.intersection(range)?.length ?? 0) <= 0 { continue }
+        tokens.append(LanguageConfiguration.Tokeniser.Token(token: tokenType, range: captureRange))
       }
     }
 
-    // Sort by location and remove duplicates (some captures may overlap)
-    return tokens.sorted { $0.range.location < $1.range.location }
+    tokens.sort {
+      if $0.range.location != $1.range.location { return $0.range.location < $1.range.location }
+      return $0.range.length > $1.range.length
+    }
+    return tokens
   }
 
   // MARK: - Helpers
@@ -149,22 +145,23 @@ public final class TreeSitterTokenizer {
                                newText: String,
                                editedRange: NSRange,
                                delta: Int) -> InputEdit {
-    // Convert character positions to byte positions
-    let startIndex = oldText.index(oldText.startIndex, offsetBy: min(editedRange.location, oldText.count))
-    let startByte = UInt32(oldText.utf8.distance(from: oldText.startIndex, to: startIndex))
+    // SwiftTreeSitter uses UTF-16LE input encoding.
+    // Tree-sitter expects byte offsets; for UTF-16, that's 2 bytes per UTF-16 code unit.
+    let oldLength = oldText.utf16.count
+    let newLength = newText.utf16.count
 
-    let oldEndLocation = min(editedRange.location + editedRange.length, oldText.count)
-    let oldEndIndex = oldText.index(oldText.startIndex, offsetBy: oldEndLocation)
-    let oldEndByte = UInt32(oldText.utf8.distance(from: oldText.startIndex, to: oldEndIndex))
+    let start = min(editedRange.location, oldLength)
+    let oldEnd = min(editedRange.location + editedRange.length, oldLength)
+    let newEnd = min(editedRange.location + editedRange.length + delta, newLength)
 
-    let newEndLocation = min(editedRange.location + editedRange.length + delta, newText.count)
-    let newEndIndex = newText.index(newText.startIndex, offsetBy: newEndLocation)
-    let newEndByte = UInt32(newText.utf8.distance(from: newText.startIndex, to: newEndIndex))
+    let startByte = UInt32(start * 2)
+    let oldEndByte = UInt32(oldEnd * 2)
+    let newEndByte = UInt32(newEnd * 2)
 
-    // Calculate points
-    let startPoint = pointFor(offset: editedRange.location, in: oldText)
-    let oldEndPoint = pointFor(offset: oldEndLocation, in: oldText)
-    let newEndPoint = pointFor(offset: newEndLocation, in: newText)
+    // Calculate points (row, column in bytes).
+    let startPoint = pointFor(utf16Offset: start, in: oldText)
+    let oldEndPoint = pointFor(utf16Offset: oldEnd, in: oldText)
+    let newEndPoint = pointFor(utf16Offset: newEnd, in: newText)
 
     return InputEdit(
       startByte: startByte,
@@ -176,25 +173,25 @@ public final class TreeSitterTokenizer {
     )
   }
 
-  /// Calculate a Point (row, column) for a character offset.
+  /// Calculate a Point (row, column in bytes) for a UTF-16 code unit offset.
   ///
-  private func pointFor(offset: Int, in text: String) -> Point {
+  private func pointFor(utf16Offset offset: Int, in text: String) -> Point {
     var row: UInt32 = 0
-    var column: UInt32 = 0
+    var columnUnits: UInt32 = 0
     var currentOffset = 0
 
-    for char in text {
+    for unit in text.utf16 {
       if currentOffset >= offset { break }
-      if char == "\n" {
+      if unit == 0x0A {
         row += 1
-        column = 0
+        columnUnits = 0
       } else {
-        column += UInt32(char.utf8.count)
+        columnUnits += 1
       }
       currentOffset += 1
     }
 
-    return Point(row: row, column: column)
+    return Point(row: row, column: columnUnits * 2)
   }
 }
 
@@ -206,51 +203,59 @@ public struct TreeSitterCaptureMappings {
 
   /// Swift language capture mapping.
   ///
-    nonisolated(unsafe) public static let swift: [String: LanguageConfiguration.Token] = [
+  nonisolated(unsafe) public static let swift: [String: LanguageConfiguration.Token] = [
     // Keywords
     "keyword": .keyword,
     "keyword.function": .keyword,
-    "keyword.return": .keyword,
-    "keyword.control": .keyword,
-    "keyword.storage": .keyword,
+    "keyword.modifier": .keyword,
+    "keyword.type": .keyword,
+    "keyword.coroutine": .keyword,
+    "keyword.directive": .keyword,
     "keyword.import": .keyword,
+    "keyword.repeat": .keyword,
+    "keyword.conditional": .keyword,
+    "keyword.conditional.ternary": .keyword,
+    "keyword.return": .keyword,
+    "keyword.exception": .keyword,
     "keyword.operator": .keyword,
 
     // Literals
     "string": .string,
-    "string.special": .string,
+    "string.escape": .string,
+    "string.regexp": .regexp,
     "character": .character,
+    "character.special": .character,
     "number": .number,
     "number.float": .number,
     "boolean": .keyword,
+    "constant.builtin": .keyword,
 
     // Comments
     "comment": .singleLineComment,
-    "comment.line": .singleLineComment,
-    "comment.block": .nestedCommentOpen,
+    "comment.documentation": .singleLineComment,
 
     // Identifiers
+    "attribute": .keyword,
     "type": .identifier(.type(.other)),
     "type.builtin": .identifier(.type(.other)),
-    "function": .identifier(.function),
-    "function.method": .identifier(.method),
     "variable": .identifier(.variable),
+    "variable.builtin": .identifier(.variable),
     "variable.parameter": .identifier(.parameter),
+    "variable.member": .identifier(.property),
     "property": .identifier(.property),
-    "constant": .identifier(nil),
+    "function.method": .identifier(.method),
+    "function.call": .identifier(.function),
+    "function.macro": .identifier(.macro),
+    "constant.macro": .identifier(.macro),
+    "constructor": .identifier(.function),
+    "module": .identifier(.module),
+    "label": .identifier(nil),
 
     // Operators and punctuation
     "operator": .operator(nil),
     "punctuation.delimiter": .symbol,
-    "punctuation.bracket": .roundBracketOpen,  // Generic, specific brackets below
-
-    // Brackets
-    "punctuation.bracket.round.open": .roundBracketOpen,
-    "punctuation.bracket.round.close": .roundBracketClose,
-    "punctuation.bracket.square.open": .squareBracketOpen,
-    "punctuation.bracket.square.close": .squareBracketClose,
-    "punctuation.bracket.curly.open": .curlyBracketOpen,
-    "punctuation.bracket.curly.close": .curlyBracketClose,
+    "punctuation.bracket": .symbol,
+    "punctuation.special": .symbol,
   ]
 
   /// Python language capture mapping.

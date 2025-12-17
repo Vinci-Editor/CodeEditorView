@@ -7,6 +7,8 @@
 
 import Foundation
 import RegexBuilder
+import SwiftTreeSitter
+import TreeSitterSwiftGrammar
 
 
 private let swiftReservedIdentifiers =
@@ -81,6 +83,10 @@ extension LanguageConfiguration {
                                  operatorRegex: operatorRegex,
                                  reservedIdentifiers: swiftReservedIdentifiers,
                                  reservedOperators: swiftReservedOperators,
-                                 languageService: languageService)
+                                 languageService: languageService,
+                                 treeSitterLanguage: { Language(language: tree_sitter_swift()) },
+                                 treeSitterHighlightQuery: SwiftTreeSitterQueries.swiftHighlights,
+                                 treeSitterCaptureMapping: TreeSitterCaptureMappings.swift,
+                                 preferTreeSitter: true)
   }
 }

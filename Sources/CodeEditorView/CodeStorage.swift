@@ -119,30 +119,51 @@ extension CodeStorage {
   ///
   func colour(for linetoken: LineToken) -> OSColor {
     switch linetoken.kind {
-    case .comment: theme.commentColour
+    case .comment:
+      return theme.commentColour
     case .token(let token):
       switch token {
-      case .string:     theme.stringColour
-      case .character:  theme.characterColour
-      case .number:     theme.numberColour
+      case .singleLineComment, .nestedCommentOpen, .nestedCommentClose:
+        return theme.commentColour
+      case .string:
+        return theme.stringColour
+      case .character:
+        return theme.characterColour
+      case .number:
+        return theme.numberColour
+      case .regexp:
+        return theme.stringColour
       case .identifier(let flavour):
         switch flavour {
-        case .type:     theme.typeColour
-        case .property: theme.fieldColour
-        case .enumCase: theme.caseColour
-        default:        theme.identifierColour
+        case .type:
+          return theme.typeColour
+        case .property:
+          return theme.fieldColour
+        case .enumCase:
+          return theme.caseColour
+        default:
+          return theme.identifierColour
         }
       case .operator(let flavour):
         switch flavour {
-        case .type:     theme.typeColour
-        case .property: theme.fieldColour
-        case .enumCase: theme.caseColour
-        default:        theme.operatorColour
+        case .type:
+          return theme.typeColour
+        case .property:
+          return theme.fieldColour
+        case .enumCase:
+          return theme.caseColour
+        default:
+          return theme.operatorColour
         }
-      case .keyword:    theme.keywordColour
-      case .symbol:     theme.symbolColour
-      default:          theme.textColour
+      case .keyword:
+        return theme.keywordColour
+      case .symbol:
+        return theme.symbolColour
+      default:
+        return theme.textColour
       }
+    default:
+      return theme.textColour
     }
   }
   
@@ -168,6 +189,22 @@ extension CodeStorage {
         layoutManager.setRenderingAttributes([.foregroundColor: theme.textColour, .hideInvisibles: ()],
                                              for: textRange)
       }
+
+      // Tree-sitter viewport highlighting (preferred when configured).
+      let viewportCharRange: NSRange? = layoutManager.textViewportLayoutController.viewportRange
+        .map { contentStorage.range(for: $0) }
+      let usedTreeSitter = delegate.enumerateTreeSitterHighlightTokens(in: range,
+                                                                       viewport: viewportCharRange,
+                                                                       layoutManager: layoutManager) { token in
+        guard let documentRange = token.range.intersection(range),
+              let textRange = contentStorage.textRange(for: documentRange)
+        else { return }
+
+        let lineToken = LineToken(range: documentRange, column: 0, kind: .token(token.token))
+        let colour = colour(for: lineToken)
+        layoutManager.setRenderingAttributes([.foregroundColor: colour], for: textRange)
+      }
+      if usedTreeSitter { return }
 
       // On-demand tokenization: Sync-tokenize only the first few visible lines for instant highlighting.
       // This ensures the first render has highlighting without blocking on the entire viewport.
@@ -358,33 +395,36 @@ extension CodeStorage {
     {
       var skipUntil: Int? = startLocation  // tokens from this location onwards (even in part) are enumerated
 
-      var tokens        = tokens
-      var commentRanges = commentRanges
-      while !tokens.isEmpty || !commentRanges.isEmpty {
+      // PERF: Avoid copying arrays and `removeFirst()` (O(n²) overall).
+      var tokenIndex = 0
+      var commentIndex = 0
+      while tokenIndex < tokens.count || commentIndex < commentRanges.count {
 
-        let token        = tokens.first,
-            commentRange = commentRanges.first
+        let token = tokenIndex < tokens.count ? tokens[tokenIndex] : nil
+        let commentRange = commentIndex < commentRanges.count ? commentRanges[commentIndex] : nil
+
         if let token,
-           (commentRange?.location ?? Int.max) > token.range.location {
+           (commentRange?.location ?? Int.max) > token.range.location
+        {
 
-          if skipUntil ?? 0 <= token.range.max - 1,
+          if (skipUntil ?? 0) <= token.range.max - 1,
              let range = token.range.shifted(by: lineStart)
           {
             let doContinue = block(LineToken(range: range, column: token.range.location, kind: .token(token.token)))
             if !doContinue { return false }
           }
-          tokens.removeFirst()
+          tokenIndex += 1
 
         } else if let commentRange {
 
-          if skipUntil ?? 0 <= commentRange.max - 1,
+          if (skipUntil ?? 0) <= commentRange.max - 1,
              let range = commentRange.shifted(by: lineStart)
           {
             let doContinue = block(LineToken(range: range, column: commentRange.location, kind: .comment))
             if !doContinue { return false }
             skipUntil = commentRange.max      // skip tokens within the comment range
           }
-          commentRanges.removeFirst()
+          commentIndex += 1
         }
       }
       return true
@@ -443,12 +483,14 @@ extension CodeStorage {
     {
       var skipUntil: Int? = skipBefore  // tokens from this location onwards (even in part) are enumerated
 
-      var tokens        = tokens
-      var commentRanges = commentRanges
-      while !tokens.isEmpty || !commentRanges.isEmpty {
+      // PERF: Avoid copying arrays and `removeFirst()` (O(n²) overall).
+      var tokenIndex = 0
+      var commentIndex = 0
+      while tokenIndex < tokens.count || commentIndex < commentRanges.count {
 
-        let token        = tokens.first,
-            commentRange = commentRanges.first
+        let token = tokenIndex < tokens.count ? tokens[tokenIndex] : nil
+        let commentRange = commentIndex < commentRanges.count ? commentRanges[commentIndex] : nil
+
         if let token,
            (commentRange?.location ?? Int.max) > token.range.location
         {
@@ -460,7 +502,7 @@ extension CodeStorage {
             }
             if tokenEnd >= stopAfter { return }
           }
-          tokens.removeFirst()
+          tokenIndex += 1
 
         } else if let commentRange {
           if let range = commentRange.shifted(by: lineStart) {
@@ -471,7 +513,7 @@ extension CodeStorage {
             }
             if commentEnd >= stopAfter { return }
           }
-          commentRanges.removeFirst()
+          commentIndex += 1
         }
       }
     }

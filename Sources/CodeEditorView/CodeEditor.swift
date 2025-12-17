@@ -550,7 +550,8 @@ extension CodeEditor: UIViewRepresentable {
 
       // NB: Don't use `self.text` here as the closure will capture it without an option to update it when the view
       //     gets updated with a new 'text' bdining.
-      if context.coordinator.text != text { context.coordinator.text = text }    }
+      if context.coordinator.text != text { context.coordinator.text = text }
+    }
 
     context.coordinator.updatingView = true
     defer {
@@ -575,7 +576,13 @@ extension CodeEditor: UIViewRepresentable {
 
     if let delegate = codeView.delegate as? CodeViewDelegate {
 
-      delegate.textDidChange      = context.coordinator.textDidChange
+      // The property `delegate.textDidChange` may already have been set during initialisation of the `CodeView`
+      // (e.g. by the safe renderingAttributesValidator wrapper). Hence, we add to it; instead of overwriting it.
+      let currentTextDidChange = delegate.textDidChange
+      delegate.textDidChange = { [currentTextDidChange] textView in
+        context.coordinator.textDidChange(textView)
+        currentTextDidChange?(textView)
+      }
       delegate.selectionDidChange = { textView in
         selectionDidChange(textView)
         context.coordinator.selectionDidChange(textView)
@@ -656,43 +663,6 @@ extension CodeEditor: UIViewRepresentable {
       codeView.language                 = language
       context.coordinator.info.language = language.name
     }
-
-    // Check if view size changed and handle resize optimization
-    // Debounced to avoid lag during continuous resizing (e.g., multitasking, rotation)
-    let currentSize = codeView.frame.size
-    if context.coordinator.lastViewSize != currentSize {
-      context.coordinator.lastViewSize = currentSize
-
-      // Mark as resizing to skip expensive operations
-      context.coordinator.isResizing = true
-      codeView.isResizing = true
-
-      // Capture and show minimap snapshot at start of resize (fast cached display)
-      if codeView.viewLayout.showMinimap {
-        codeView.minimapView?.captureSnapshot()
-        codeView.minimapView?.showSnapshot()
-      }
-
-      // Update container width immediately for smooth word wrap during resize
-      codeView.updateContainerWidthForResize()
-
-      // Cancel any pending work
-      context.coordinator.resizeEndWorkItem?.cancel()
-
-      // Schedule end of resize detection (50ms after last size change)
-      let resizeEndWork = DispatchWorkItem { [weak codeView] in
-        context.coordinator.isResizing = false
-        codeView?.isResizing = false
-
-        // Hide minimap snapshot and show live content
-        codeView?.minimapView?.hideSnapshot()
-
-        // Viewport-only relayout after resize ends
-        codeView?.relayoutAfterResize()
-      }
-      context.coordinator.resizeEndWorkItem = resizeEndWork
-      DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: resizeEndWork)
-    }
   }
 
   public func makeCoordinator() -> Coordinator {
@@ -703,13 +673,9 @@ extension CodeEditor: UIViewRepresentable {
                        setInfo: definitiveSetInfo)
   }
 
-  public final class Coordinator: _Coordinator {
-    var lastViewSize:       CGSize = .zero
-    var isResizing:         Bool = false
-    var resizeEndWorkItem:  DispatchWorkItem?
-
-    // Update of `self.text` happens in `CodeStorageDelegate` — see [Note Propagating text changes into SwiftUI].
-    func textDidChange(_ textView: UITextView) { }
+	  public final class Coordinator: _Coordinator {
+	    // Update of `self.text` happens in `CodeStorageDelegate` — see [Note Propagating text changes into SwiftUI].
+	    func textDidChange(_ textView: UITextView) { }
 
     func selectionDidChange(_ textView: UITextView) {
       guard !updatingView else { return }
@@ -821,6 +787,10 @@ extension CodeEditor: NSViewRepresentable {
             context.coordinator.scrollPositionDidChange(scrollView)
           }
 
+          // Keep minimap/viewport-driven work in sync with scrolling without driving SwiftUI updates.
+          codeView?.adjustScrollPositionOfMinimap()
+          codeView?.userDidScroll()
+
           // Dismiss completion panel on scroll
           if let codeView, codeView.completionPanel.isVisible {
             codeView.completionPanel.close()
@@ -914,11 +884,11 @@ extension CodeEditor: NSViewRepresentable {
     if indentationConfiguration != codeView.indentation { codeView.indentation = indentationConfiguration }
     if autoBraceConfiguration != codeView.autoBrace { codeView.autoBrace = autoBraceConfiguration }
     // Equality on language configurations implies the same name and the same language service.
-    if language != codeView.language {
-
-      let languageServiceChanged = language.languageService !== codeView.language.languageService
-      codeView.language                 = language
-      context.coordinator.info.language = language.name
+	    if language != codeView.language {
+	
+	      let languageServiceChanged = language.languageService !== codeView.language.languageService
+	      codeView.language                 = language
+	      context.coordinator.info.language = language.name
 
       if languageServiceChanged {
 
@@ -933,47 +903,9 @@ extension CodeEditor: NSViewRepresentable {
             coordinator.actions.language.extraActions = actions
           }
 
-      }
-    }
-
-    // Check if scroll view size changed and handle resize optimization
-    // Debounced to avoid lag during continuous window resizing
-    let currentSize = scrollView.frame.size
-    if context.coordinator.lastScrollViewSize != currentSize {
-      context.coordinator.lastScrollViewSize = currentSize
-
-      // Mark as resizing to skip expensive operations
-      context.coordinator.isResizing = true
-      codeView.isResizing = true
-
-      // Capture and show minimap snapshot at start of resize (fast cached display)
-      if codeView.viewLayout.showMinimap {
-        codeView.minimapView?.captureSnapshot()
-        codeView.minimapView?.showSnapshot()
-      }
-
-      // Update container width immediately for smooth word wrap during resize
-      codeView.updateContainerWidthForResize()
-
-      // Cancel any pending work
-      context.coordinator.relayoutWorkItem?.cancel()
-      context.coordinator.resizeEndWorkItem?.cancel()
-
-      // Schedule end of resize detection (50ms after last size change)
-      let resizeEndWork = DispatchWorkItem { [weak codeView] in
-        context.coordinator.isResizing = false
-        codeView?.isResizing = false
-
-        // Hide minimap snapshot and show live content
-        codeView?.minimapView?.hideSnapshot()
-
-        // Viewport-only relayout after resize ends
-        codeView?.relayoutAfterResize()
-      }
-      context.coordinator.resizeEndWorkItem = resizeEndWork
-      DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: resizeEndWork)
-    }
-  }
+	      }
+	    }
+	  }
 
   public func makeCoordinator() -> Coordinator {
     return Coordinator(text: $text,
@@ -983,18 +915,14 @@ extension CodeEditor: NSViewRepresentable {
                        setInfo: definitiveSetInfo)
   }
 
-  public final class Coordinator: _Coordinator {
-    var boundsChangedNotificationObserver: NSObjectProtocol?
-    var extraActionsCancellable:           Cancellable?
-    var breakUndoCoalescingCancellable:    Cancellable?
-    var lastScrollViewSize:                CGSize = .zero
-    var relayoutWorkItem:                  DispatchWorkItem?
-    var isResizing:                        Bool = false
-    var resizeEndWorkItem:                 DispatchWorkItem?
-
-    deinit {
-      if let observer = boundsChangedNotificationObserver { NotificationCenter.default.removeObserver(observer) }
-    }
+	  public final class Coordinator: _Coordinator {
+	    var boundsChangedNotificationObserver: NSObjectProtocol?
+	    var extraActionsCancellable:           Cancellable?
+	    var breakUndoCoalescingCancellable:    Cancellable?
+	
+	    deinit {
+	      if let observer = boundsChangedNotificationObserver { NotificationCenter.default.removeObserver(observer) }
+	    }
 
     // Update of `self.text` happens in `CodeStorageDelegate` — see [Note Propagating text changes into SwiftUI].
     func textDidChange(_ textView: NSTextView) { }
@@ -1095,4 +1023,3 @@ struct CodeEditor_Previews: PreviewProvider {
                language: .haskell())
   }
 }
-
