@@ -1689,7 +1689,8 @@ final class CodeView: NSTextView {
 
     let visibleWidth = enclosingScrollView?.documentVisibleRect.width ?? bounds.width
 
-    let desiredContainerWidth: CGFloat = if viewLayout.wrapText {
+    let desiredContainerWidth: CGFloat
+    if viewLayout.wrapText {
       if viewLayout.showMinimap {
         let minimapFontWidth = fontWidth / minimapRatio
         let minimapGutterWidth = ceil(minimapFontWidth * 7)
@@ -1699,15 +1700,15 @@ final class CodeView: NSTextView {
         let availableWidth = max(CGFloat(0), visibleWidth - gutterWithPadding - minimapExtras)
         let compositeFontWidth = fontWidth + minimapFontWidth
         let columns = max(0, Int(floor(availableWidth / compositeFontWidth)))
-        lineFragmentPadding + (CGFloat(columns) * fontWidth)
+        desiredContainerWidth = lineFragmentPadding + (CGFloat(columns) * fontWidth)
       } else {
         let gutterWithPadding = gutterWidth + lineFragmentPadding
         let availableWidth = max(CGFloat(0), visibleWidth - gutterWithPadding)
         let columns = max(0, Int(floor(availableWidth / fontWidth)))
-        lineFragmentPadding + (CGFloat(columns) * fontWidth)
+        desiredContainerWidth = lineFragmentPadding + (CGFloat(columns) * fontWidth)
       }
     } else {
-      CGFloat.greatestFiniteMagnitude
+      desiredContainerWidth = CGFloat.greatestFiniteMagnitude
     }
 
     guard abs(codeContainer.size.width - desiredContainerWidth) > 0.0001 else { return }
@@ -1777,7 +1778,8 @@ final class CodeView: NSTextView {
       codeContainer.lineFragmentPadding = lineFragmentPadding
     }
 
-    let desiredContainerWidth: CGFloat = if viewLayout.wrapText {
+    let desiredContainerWidth: CGFloat
+    if viewLayout.wrapText {
       if viewLayout.showMinimap {
         let minimapFontWidth = fontWidth / minimapRatio
         let minimapGutterWidth = ceil(minimapFontWidth * 7)
@@ -1787,15 +1789,15 @@ final class CodeView: NSTextView {
         let availableWidth = max(CGFloat(0), visibleWidth - gutterWithPadding - minimapExtras)
         let compositeFontWidth = fontWidth + minimapFontWidth
         let columns = max(0, Int(floor(availableWidth / compositeFontWidth)))
-        lineFragmentPadding + (CGFloat(columns) * fontWidth)
+        desiredContainerWidth = lineFragmentPadding + (CGFloat(columns) * fontWidth)
       } else {
         let gutterWithPadding = gutterWidth + lineFragmentPadding
         let availableWidth = max(CGFloat(0), visibleWidth - gutterWithPadding)
         let columns = max(0, Int(floor(availableWidth / fontWidth)))
-        lineFragmentPadding + (CGFloat(columns) * fontWidth)
+        desiredContainerWidth = lineFragmentPadding + (CGFloat(columns) * fontWidth)
       }
     } else {
-      CGFloat.greatestFiniteMagnitude
+      desiredContainerWidth = CGFloat.greatestFiniteMagnitude
     }
 
     codeContainer.size = CGSize(width: desiredContainerWidth, height: CGFloat.greatestFiniteMagnitude)
