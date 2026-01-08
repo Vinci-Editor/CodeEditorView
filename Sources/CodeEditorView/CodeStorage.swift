@@ -141,6 +141,12 @@ extension CodeStorage {
           return theme.fieldColour
         case .enumCase:
           return theme.caseColour
+        case .function, .method:
+          return theme.functionColour
+        case .parameter:
+          return theme.parameterColour
+        case .macro:
+          return theme.macroColour
         default:
           return theme.identifierColour
         }
