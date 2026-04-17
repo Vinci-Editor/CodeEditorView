@@ -44,6 +44,12 @@ struct ReturnEditResult: Sendable {
   var selectionOffset: Int
 }
 
+private struct ReindentEdit {
+  var replacementRange: NSRange
+  var replacementText: String
+  var replacementStartLine: Int
+}
+
 enum CodeEditingContext {
 
   static let defaultPairs: [EditingPair] = [
@@ -211,6 +217,7 @@ extension CodeView {
 
     super.insertText(insertString, replacementRange: replacementRange)
     if let string { triggerCompletionIfNeeded(afterInserting: string) }
+    if string == "}" { reindentAfterTypingClosingBrace() }
   }
 
   override public func deleteBackward(_ sender: Any?) {
@@ -246,6 +253,7 @@ extension CodeView {
     if performPairTextInsertion(text) { return }
     super.insertText(text)
     triggerCompletionIfNeeded(afterInserting: text)
+    if text == "}" { reindentAfterTypingClosingBrace() }
   }
 
   override public func deleteBackward() {
@@ -311,6 +319,7 @@ extension CodeView {
        let pair = CodeEditingContext.pair(closing: text),
        skipOverClosingPair(pair, in: codeStorage)
     {
+      if pair.closing == "}" { reindentAfterTypingClosingBrace() }
       return true
     }
 
@@ -858,109 +867,188 @@ extension CodeView {
       return range
     }
 
-    // Determine the column index of the first character that is neither a space nor a tab character. It can be a
-    // newline or the end of the line.
-    func currentIndentation(of line: Int) -> Int? {
-
-      guard let lineInfo  = codeStorageDelegate.lineMap.lookup(line: line),
-            let textRange = Range<String.Index>(lineInfo.range, in: codeStorage.string)
-      else { return nil }
-      return indentation.currentIndentation(in: codeStorage.string[textRange])
-    }
-
-    // Determine the column index of the first non-whitespace character.
-    func startOfText(of line: Int) -> Int? {
-
-      guard let lineInfo  = codeStorageDelegate.lineMap.lookup(line: line),
-            let textRange = Range<String.Index>(lineInfo.range, in: codeStorage.string)
-      else { return nil }
-      return indentation.startOfText(in: codeStorage.string[textRange]) ?? 0
-    }
-
-    // Check if a line starts with a closing bracket (for proper dedentation)
-    func lineStartsWithClosingBracket(_ line: Int) -> Bool {
-      guard let lineInfo  = codeStorageDelegate.lineMap.lookup(line: line),
-            let textRange = Range<String.Index>(lineInfo.range, in: codeStorage.string)
-      else { return false }
-      let trimmed = codeStorage.string[textRange].drop(while: { $0 == " " || $0 == "\t" })
-      guard let firstChar = trimmed.first else { return false }
-      return firstChar == "}" || firstChar == ")" || firstChar == "]"
-    }
-
-    func predictedIndentation(for line: Int) -> Int {
-      if language.indentationSensitiveScoping {
-
-        // FIXME: We might want to cache that information.
-
-        var scannedLine = line
-        while scannedLine >= 0 {
-
-          if let index = startOfText(of: scannedLine) { return index }
-          else {
-            scannedLine -= 1
-          }
-
-        }
-        return 0
-
-      } else {
-
-        // FIXME: Only languages in the C tradition use curly braces for scoping. Needs to be more flexible.
-        guard let lineInfo = codeStorageDelegate.lineMap.lookup(line: line) else { return 0 }
-        var depth = lineInfo.info?.curlyBracketDepthStart ?? 0
-
-        // Closing brackets should be at parent level (depth - 1)
-        if lineStartsWithClosingBracket(line) && depth > 0 {
-          depth -= 1
-        }
-
-        return depth * indentation.indentWidth
-
-      }
-    }
-
     let lines = codeStorageDelegate.lineMap.linesContaining(range: range)
     guard let firstLine = lines.first else { return range }
 
     if range.length == 0 {
 
-      let desiredIndent = predictedIndentation(for: firstLine)
-      guard let currentIndent = currentIndentation(of: firstLine),
-            let lineInfo      = codeStorageDelegate.lineMap.lookup(line: firstLine)
+      guard let lineInfo = codeStorageDelegate.lineMap.lookup(line: firstLine),
+            let textRange = Range<String.Index>(lineInfo.range, in: codeStorage.string),
+            let edit = contextualReindentEdit(replacementLines: lines,
+                                              in: codeStorage,
+                                              lineMap: codeStorageDelegate.lineMap)
       else { return range }
-      let indentString = indentation.indentation(for: desiredIndent)
-      codeStorage.replaceCharacters(in: NSRange(location: lineInfo.range.location, length: currentIndent),
-                                    with: indentString)
-      return NSRange(location: lineInfo.range.location + indentString.count, length: 0)
+
+      let lineText = codeStorage.string[textRange]
+      let currentIndent = indentation.currentIndentation(in: lineText)
+      let offsetAfterIndent = max(0, range.location - lineInfo.range.location - currentIndent)
+      let newRange = reindentedInsertionPoint(forLine: firstLine,
+                                              offsetAfterIndent: offsetAfterIndent,
+                                              in: edit)
+                    ?? range.adjustSelection(forReplacing: edit.replacementRange,
+                                             by: edit.replacementText.utf16.count)
+      codeStorage.replaceCharacters(in: edit.replacementRange, with: edit.replacementText)
+      return newRange
 
     } else {
 
-      // Multi-line selection: use language.reindent() for proper relative indentation
-      // This ensures the selection is treated as standalone code and reindented consistently
-      guard let firstLineInfo = codeStorageDelegate.lineMap.lookup(line: firstLine),
-            let lastLine = lines.last,
-            let lastLineInfo = codeStorageDelegate.lineMap.lookup(line: lastLine)
+      guard let edit = contextualReindentEdit(replacementLines: lines,
+                                              in: codeStorage,
+                                              lineMap: codeStorageDelegate.lineMap)
       else { return range }
 
-      // Get the full range of all affected lines
-      let linesRange = NSRange(location: firstLineInfo.range.location,
-                               length: lastLineInfo.range.location + lastLineInfo.range.length - firstLineInfo.range.location)
+      codeStorage.replaceCharacters(in: edit.replacementRange, with: edit.replacementText)
 
-      guard let stringRange = Range<String.Index>(linesRange, in: codeStorage.string) else { return range }
-
-      let selectedText = String(codeStorage.string[stringRange])
-      let reindentedText = language.reindent(selectedText,
-                                             indentWidth: indentation.indentWidth,
-                                             useTabs: indentation.preference == .preferTabs,
-                                             tabWidth: indentation.tabWidth)
-
-      codeStorage.replaceCharacters(in: linesRange, with: reindentedText)
-
-      // Adjust the selection to account for length change
-      let lengthDiff = reindentedText.utf16.count - linesRange.length
+      let lengthDiff = edit.replacementText.utf16.count - edit.replacementRange.length
       return NSRange(location: range.location, length: max(0, range.length + lengthDiff))
 
     }
+  }
+
+  private func reindentAfterTypingClosingBrace() {
+    guard let textContentStorage  = optTextContentStorage,
+          let codeStorage         = optCodeStorage,
+          let codeStorageDelegate = codeStorage.delegate as? CodeStorageDelegate
+    else { return }
+
+    textContentStorage.performEditingTransaction {
+      processSelectedRanges { range in
+        let closeLocation = range.location - 1
+        guard range.length == 0,
+              closeLocation >= 0,
+              character(at: closeLocation, in: codeStorage) == "}",
+              let closeLine = codeStorageDelegate.lineMap.lineOf(index: closeLocation),
+              let closeLineInfo = codeStorageDelegate.lineMap.lookup(line: closeLine),
+              let closeLineRange = Range<String.Index>(closeLineInfo.range, in: codeStorage.string)
+        else { return range }
+
+        let bracketLines = enclosingBracketLines(before: closeLocation,
+                                                 in: codeStorage,
+                                                 lineMap: codeStorageDelegate.lineMap)
+        guard let openingLine = bracketLines.innermostCurly,
+              openingLine <= closeLine
+        else { return range }
+
+        let replacementLines = openingLine..<(closeLine + 1)
+        guard let edit = contextualReindentEdit(replacementLines: replacementLines,
+                                                contextStartLine: bracketLines.root ?? openingLine,
+                                                contextEndLine: closeLine + 1,
+                                                in: codeStorage,
+                                                lineMap: codeStorageDelegate.lineMap)
+        else { return range }
+
+        let currentIndent = indentation.currentIndentation(in: codeStorage.string[closeLineRange])
+        let offsetAfterIndent = max(0, range.location - closeLineInfo.range.location - currentIndent)
+        let newRange = reindentedInsertionPoint(forLine: closeLine,
+                                                offsetAfterIndent: offsetAfterIndent,
+                                                in: edit)
+                      ?? range.adjustSelection(forReplacing: edit.replacementRange,
+                                               by: edit.replacementText.utf16.count)
+        codeStorage.replaceCharacters(in: edit.replacementRange, with: edit.replacementText)
+        return newRange
+      }
+    }
+  }
+
+  private func contextualReindentEdit(replacementLines: Range<Int>,
+                                      contextStartLine: Int? = nil,
+                                      contextEndLine: Int? = nil,
+                                      in codeStorage: CodeStorage,
+                                      lineMap: LineMap<LineInfo>) -> ReindentEdit? {
+    guard let firstReplacementLine = replacementLines.first,
+          replacementLines.endIndex <= lineMap.lines.count
+    else { return nil }
+
+    var bracketContextStart: Int?
+    if contextStartLine == nil {
+      let lineStart = lineMap.lookup(line: firstReplacementLine)?.range.location ?? 0
+      bracketContextStart = enclosingBracketLines(before: lineStart,
+                                                  in: codeStorage,
+                                                  lineMap: lineMap).root
+    }
+    let inferredContextStart = contextStartLine ?? bracketContextStart ?? firstReplacementLine
+    let safeContextStart = max(0, min(inferredContextStart, firstReplacementLine))
+    let requestedContextEnd = contextEndLine ?? replacementLines.endIndex
+    let safeContextEnd = min(lineMap.lines.count, max(replacementLines.endIndex, requestedContextEnd))
+    guard safeContextStart < safeContextEnd else { return nil }
+
+    let contextLines = safeContextStart..<safeContextEnd
+    let contextRange = lineMap.charRangeOf(lines: contextLines)
+    guard let contextStringRange = Range<String.Index>(contextRange, in: codeStorage.string)
+    else { return nil }
+
+    let contextString = String(codeStorage.string[contextStringRange])
+    let reindentedContext = language.reindent(contextString,
+                                              indentWidth: indentation.indentWidth,
+                                              useTabs: indentation.preference == .preferTabs,
+                                              tabWidth: indentation.tabWidth)
+    let reindentedLineMap = LineMap<Void>(string: reindentedContext)
+    let relativeReplacementStart = replacementLines.startIndex - safeContextStart
+    let relativeReplacementEnd = replacementLines.endIndex - safeContextStart
+    let relativeReplacementLines = relativeReplacementStart..<relativeReplacementEnd
+    guard relativeReplacementLines.startIndex >= 0,
+          relativeReplacementLines.endIndex <= reindentedLineMap.lines.count
+    else { return nil }
+
+    let replacementTextRange = reindentedLineMap.charRangeOf(lines: relativeReplacementLines)
+    guard let replacementStringRange = Range<String.Index>(replacementTextRange, in: reindentedContext)
+    else { return nil }
+
+    return ReindentEdit(replacementRange: lineMap.charRangeOf(lines: replacementLines),
+                        replacementText: String(reindentedContext[replacementStringRange]),
+                        replacementStartLine: replacementLines.startIndex)
+  }
+
+  private func enclosingBracketLines(before location: Int,
+                                     in codeStorage: CodeStorage,
+                                     lineMap: LineMap<LineInfo>) -> (root: Int?, innermost: Int?, innermostCurly: Int?) {
+    guard let tokeniser = LanguageConfiguration.Tokeniser(for: language.tokenDictionary,
+                                                          caseInsensitiveReservedIdentifiers: language.caseInsensitiveReservedIdentifiers)
+    else { return (nil, nil, nil) }
+
+    let safeLocation = max(0, min(location, codeStorage.length))
+    guard let prefixRange = Range<String.Index>(NSRange(location: 0, length: safeLocation), in: codeStorage.string)
+    else { return (nil, nil, nil) }
+
+    var stack: [(token: LanguageConfiguration.Token, location: Int)] = []
+    for token in codeStorage.string[prefixRange].tokenise(with: tokeniser, state: LanguageConfiguration.State.tokenisingCode) {
+      switch token.token {
+      case .roundBracketOpen, .squareBracketOpen, .curlyBracketOpen:
+        stack.append((token: token.token, location: token.range.location))
+
+      case .roundBracketClose, .squareBracketClose, .curlyBracketClose:
+        guard let matchingBracket = token.token.matchingBracket else { continue }
+        if let matchingIndex = stack.lastIndex(where: { $0.token == matchingBracket }) {
+          stack.removeSubrange(matchingIndex...)
+        }
+
+      default:
+        continue
+      }
+    }
+
+    return (root: stack.first.flatMap { lineMap.lineOf(index: $0.location) },
+            innermost: stack.last.flatMap { lineMap.lineOf(index: $0.location) },
+            innermostCurly: stack.last(where: { $0.token == .curlyBracketOpen }).flatMap {
+              lineMap.lineOf(index: $0.location)
+            })
+  }
+
+  private func reindentedInsertionPoint(forLine line: Int,
+                                        offsetAfterIndent: Int,
+                                        in edit: ReindentEdit) -> NSRange? {
+    let relativeLine = line - edit.replacementStartLine
+    guard relativeLine >= 0 else { return nil }
+
+    let replacementLineMap = LineMap<Void>(string: edit.replacementText)
+    guard let lineInfo = replacementLineMap.lookup(line: relativeLine),
+          let lineRange = Range<String.Index>(lineInfo.range, in: edit.replacementText)
+    else { return nil }
+
+    let lineText = edit.replacementText[lineRange]
+    let newIndent = indentation.currentIndentation(in: lineText)
+    let locationInLine = min(lineInfo.range.length, newIndent + offsetAfterIndent)
+    return NSRange(location: edit.replacementRange.location + lineInfo.range.location + locationInLine, length: 0)
   }
 
   /// Implements the indentation behaviour for the tab key.
