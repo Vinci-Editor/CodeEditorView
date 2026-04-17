@@ -265,9 +265,8 @@ extension GutterView {
     let selectedLines = textView?.selectedLines ?? Set(1..<2)
 
     // We always enumerate all lines that are in the viewport (but we don't draw if they fall outside of `rect`).
-    let textRange      = textLayoutManager.textViewportLayoutController.viewportRange
-                         ?? textLayoutManager.documentRange,
-        characterRange = textContentStorage.range(for: textRange)
+    guard let textRange = textLayoutManager.textViewportLayoutController.viewportRange else { return }
+    let characterRange = textContentStorage.range(for: textRange)
 
     // Draw line numbers unless this is a gutter for a minimap
     guard !isMinimapGutter else { return }

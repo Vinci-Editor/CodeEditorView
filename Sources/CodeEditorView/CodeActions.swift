@@ -278,6 +278,11 @@ extension CodeView {
   /// Dismiss the completion overlay.
   ///
   func dismissCompletion() {
+    if completionTask != nil {
+      completionTask?.cancel()
+      completionTask = nil
+      CodeEditorInstrumentation.record(.completionTaskCancelled)
+    }
     // Clear the handler first to prevent recursive calls (handler calls dismissCompletion on .cancel)
     completionOverlay.progressHandler = nil
     completionOverlay.removeFromSuperview()
@@ -390,17 +395,21 @@ extension CodeView {
     var overlayX = cursorRect.minX
     var overlayY = cursorRect.maxY + 4
 
-    // Ensure the overlay stays within bounds
-    let maxX = bounds.width - overlaySize.width - 8
-    let maxY = bounds.height - overlaySize.height - 8
+    // Clamp in visible content coordinates. `bounds` carries the scroll offset for UIScrollView subclasses.
+    let visibleRect = CGRect(x: bounds.minX + adjustedContentInset.left + 8,
+                             y: bounds.minY + adjustedContentInset.top + 8,
+                             width: max(0, bounds.width - adjustedContentInset.left - adjustedContentInset.right - 16),
+                             height: max(0, bounds.height - adjustedContentInset.top - adjustedContentInset.bottom - 16))
+    let maxX = visibleRect.maxX - overlaySize.width
+    let maxY = visibleRect.maxY - overlaySize.height
 
-    overlayX = min(max(8, overlayX), maxX)
+    overlayX = maxX >= visibleRect.minX ? min(max(visibleRect.minX, overlayX), maxX) : visibleRect.minX
 
     // If there's not enough space below, show above
-    if overlayY + overlaySize.height > bounds.height - 8 {
+    if overlayY + overlaySize.height > visibleRect.maxY {
       overlayY = cursorRect.minY - overlaySize.height - 4
     }
-    overlayY = max(8, overlayY)
+    overlayY = maxY >= visibleRect.minY ? min(max(visibleRect.minY, overlayY), maxY) : visibleRect.minY
 
     completionOverlay.frame = CGRect(x: overlayX, y: overlayY, width: overlaySize.width, height: overlaySize.height)
   }
@@ -411,13 +420,22 @@ extension CodeView {
   ///   - location: The character location for which code completions are requested.
   ///   - explicitTrigger: The completion computation was explicitly triggered.
   ///
-  func computeAndShowCompletions(at location: Int, explicitTrigger: Bool) async throws {
+  func computeAndShowCompletions(at location: Int,
+                                 explicitTrigger: Bool,
+                                 reason triggerReason: CompletionTriggerReason? = nil) async throws {
     guard let languageService = optLanguageService else { return }
 
     do {
 
-      let reason: CompletionTriggerReason = if isCompletionVisible { .incomplete } else { .standard },
-          completions                     = try await languageService.completions(at: location, reason: reason)
+      let reason: CompletionTriggerReason
+      if let triggerReason {
+        reason = triggerReason
+      } else if isCompletionVisible {
+        reason = .incomplete
+      } else {
+        reason = .standard
+      }
+      let completions = try await languageService.completions(at: location, reason: reason)
       try Task.checkCancellation()   // may have been cancelled in the meantime due to further user action
       show(completions: completions, for: rangeForUserCompletion, explicitTrigger: explicitTrigger)
 
@@ -862,9 +880,12 @@ final class CompletionPanel: NSPanel {
   override var canBecomeKey: Bool { false }
 
   override func close() {
+    resolveTask?.cancel()
+    resolveTask = nil
     // We cancel the completion process if the window gets closed (and the `progressHandler` is still active (i.e., it
     // is non-`nil`).
     progressHandler?(.cancel)
+    progressHandler = nil
     super.close()
   }
 
@@ -1053,13 +1074,22 @@ extension CodeView {
   ///   - location: The character location for which code completions are requested.
   ///   - explicitTrigger: The completion computation was explicitly triggered.
   ///
-  func computeAndShowCompletions(at location: Int, explicitTrigger: Bool) async throws {
+  func computeAndShowCompletions(at location: Int,
+                                 explicitTrigger: Bool,
+                                 reason triggerReason: CompletionTriggerReason? = nil) async throws {
     guard let languageService = optLanguageService else { return }
 
     do {
 
-      let reason: CompletionTriggerReason = if completionPanel.isVisible { .incomplete } else { .standard },
-          completions                     = try await languageService.completions(at: location, reason: reason)
+      let reason: CompletionTriggerReason
+      if let triggerReason {
+        reason = triggerReason
+      } else if completionPanel.isVisible {
+        reason = .incomplete
+      } else {
+        reason = .standard
+      }
+      let completions = try await languageService.completions(at: location, reason: reason)
       try Task.checkCancellation()   // may have been cancelled in the meantime due to further user action
       show(completions: completions, for: rangeForUserCompletion, explicitTrigger: explicitTrigger)
 

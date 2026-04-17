@@ -176,6 +176,7 @@ final class BackgroundTokenizer {
 
       // Tokenize a batch of lines
       let batch = Array(pendingLines.prefix(batchSize))
+      CodeEditorInstrumentation.record(.backgroundTokenBatch)
       let tokenizedRange = tokenizeBatch(batch, delegate: delegate, storage: storage)
 
       if let range = tokenizedRange {

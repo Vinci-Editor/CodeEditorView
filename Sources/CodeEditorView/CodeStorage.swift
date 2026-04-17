@@ -66,32 +66,10 @@ class CodeStorage: NSTextStorage {
     return textStorage.attributes(at: location, effectiveRange: range)
   }
 
-  // Extended to handle auto-deletion of adjacent matching brackets
   override func replaceCharacters(in range: NSRange, with str: String) {
-
     beginEditing()
-
-    // We are deleting one character => check whether it is a one-character bracket and if so also delete its matching
-    // bracket if it is directly adjacent
-    if range.length == 1 && str.isEmpty,
-       let deletedToken = token(at: range.location).token,
-       let language     = (delegate as? CodeStorageDelegate)?.language,
-       deletedToken.token.isOpenBracket
-        && range.location + 1 < length
-        && language.lexeme(of: deletedToken.token)?.count == 1
-        && token(at: range.location + 1).token?.token == deletedToken.token.matchingBracket
-    {
-
-      let extendedRange = NSRange(location: range.location, length: 2)
-      textStorage.replaceCharacters(in: extendedRange, with: "")
-      edited([.editedCharacters, .editedAttributes], range: extendedRange, changeInLength: -2)
-
-    } else {
-
-      textStorage.replaceCharacters(in: range, with: str)
-      edited(.editedCharacters, range: range, changeInLength: (str as NSString).length - range.length)
-
-    }
+    textStorage.replaceCharacters(in: range, with: str)
+    edited(.editedCharacters, range: range, changeInLength: (str as NSString).length - range.length)
     endEditing()
   }
 
@@ -143,7 +121,7 @@ extension CodeStorage {
           return theme.caseColour
         case .function, .method:
           return theme.functionColour
-        case .parameter:
+        case .parameter, .typeParameter:
           return theme.parameterColour
         case .macro:
           return theme.macroColour
@@ -158,6 +136,12 @@ extension CodeStorage {
           return theme.fieldColour
         case .enumCase:
           return theme.caseColour
+        case .function, .method:
+          return theme.functionColour
+        case .parameter, .typeParameter:
+          return theme.parameterColour
+        case .macro:
+          return theme.macroColour
         default:
           return theme.operatorColour
         }
@@ -186,6 +170,7 @@ extension CodeStorage {
   ///
   func setHighlightingAttributes(for range: NSRange, in layoutManager: NSTextLayoutManager)
   {
+      CodeEditorInstrumentation.record(.renderingAttributesValidated)
       guard let contentStorage = layoutManager.textContentManager as? NSTextContentStorage,
             let delegate = self.delegate as? CodeStorageDelegate
       else { return }
@@ -230,6 +215,7 @@ extension CodeStorage {
             let _ = delegate.tokenise(range: lineRange, in: self, maxTrailingLines: 1)
             delegate.setTokenizationState(.tokenized, for: line..<(line + 1))
             syncTokenizedCount += 1
+            CodeEditorInstrumentation.record(.syncTokenizedLines)
           }
         }
         // Lines beyond maxSyncLines will be handled by background tokenizer

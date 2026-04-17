@@ -10,6 +10,59 @@ import SwiftUI
 
 import LanguageSupport
 
+// MARK: -
+// MARK: Pure editing core
+
+struct EditingPair: Equatable, Sendable {
+  var opening: String
+  var closing: String
+  var isQuote: Bool
+}
+
+struct EditorEditContext: Sendable {
+  var textUTF16Length: Int
+  var selections: [NSRange]
+  var typedText: String
+  var indentation: CodeEditor.IndentationConfiguration
+  var pairEditing: CodeEditor.PairEditingConfiguration
+}
+
+struct SelectionTransform: Sendable {
+  var replacementRange: NSRange
+  var replacementText: String
+  var selection: NSRange
+}
+
+struct PairEditResult: Sendable {
+  var edits: [SelectionTransform]
+  var textChanged: Bool
+  var shouldBreakUndoCoalescing: Bool
+}
+
+struct ReturnEditResult: Sendable {
+  var replacementText: String
+  var selectionOffset: Int
+}
+
+enum CodeEditingContext {
+
+  static let defaultPairs: [EditingPair] = [
+    EditingPair(opening: "(", closing: ")", isQuote: false),
+    EditingPair(opening: "[", closing: "]", isQuote: false),
+    EditingPair(opening: "{", closing: "}", isQuote: false),
+    EditingPair(opening: "\"", closing: "\"", isQuote: true),
+    EditingPair(opening: "'", closing: "'", isQuote: true)
+  ]
+
+  static func pair(opening: String) -> EditingPair? {
+    defaultPairs.first { $0.opening == opening }
+  }
+
+  static func pair(closing: String) -> EditingPair? {
+    defaultPairs.first { $0.closing == closing }
+  }
+}
+
 
 // MARK: -
 // MARK: Actions and commands
@@ -147,6 +200,29 @@ extension CodeView {
 
 #if os(macOS)
 
+  override public func insertText(_ insertString: Any, replacementRange: NSRange) {
+    let string = (insertString as? NSAttributedString)?.string ?? insertString as? String
+    if let string,
+       replacementRange.location == NSNotFound,
+       performPairTextInsertion(string)
+    {
+      return
+    }
+
+    super.insertText(insertString, replacementRange: replacementRange)
+    if let string { triggerCompletionIfNeeded(afterInserting: string) }
+  }
+
+  override public func deleteBackward(_ sender: Any?) {
+    if performPairedDeletion(backward: true) { return }
+    super.deleteBackward(sender)
+  }
+
+  override public func deleteForward(_ sender: Any?) {
+    if performPairedDeletion(backward: false) { return }
+    super.deleteForward(sender)
+  }
+
   override public func keyDown(with event: NSEvent) {
 
     // Forward relevant events to completion panel if visible
@@ -165,6 +241,17 @@ extension CodeView {
   }
 
 #elseif os(iOS) || os(visionOS)
+
+  override public func insertText(_ text: String) {
+    if performPairTextInsertion(text) { return }
+    super.insertText(text)
+    triggerCompletionIfNeeded(afterInserting: text)
+  }
+
+  override public func deleteBackward() {
+    if performPairedDeletion(backward: true) { return }
+    super.deleteBackward()
+  }
 
   override var keyCommands: [UIKeyCommand]? {
     var commands: [UIKeyCommand] = []
@@ -186,7 +273,20 @@ extension CodeView {
     }
 
     // Ctrl+Space to trigger completion (always available)
-    commands.append(UIKeyCommand(input: " ", modifierFlags: .control, action: #selector(triggerCompletion)))
+    commands.append(UIKeyCommand(input: " ", modifierFlags: .control, action: #selector(triggerCompletion),
+                                 discoverabilityTitle: "Complete"))
+    commands.append(UIKeyCommand(input: "D", modifierFlags: .command, action: #selector(duplicate(_:)),
+                                 discoverabilityTitle: "Duplicate"))
+    commands.append(UIKeyCommand(input: "I", modifierFlags: .control, action: #selector(reindent(_:)),
+                                 discoverabilityTitle: "Re-Indent"))
+    commands.append(UIKeyCommand(input: "/", modifierFlags: .command, action: #selector(commentSelection(_:)),
+                                 discoverabilityTitle: "Comment Selection"))
+    commands.append(UIKeyCommand(input: "[", modifierFlags: .command, action: #selector(shiftLeft(_:)),
+                                 discoverabilityTitle: "Shift Left"))
+    commands.append(UIKeyCommand(input: "]", modifierFlags: .command, action: #selector(shiftRight(_:)),
+                                 discoverabilityTitle: "Shift Right"))
+    commands.append(UIKeyCommand(input: "\t", modifierFlags: .shift, action: #selector(shiftLeft(_:)),
+                                 discoverabilityTitle: "Shift Left"))
 
     return commands
   }
@@ -196,6 +296,173 @@ extension CodeView {
   }
 
 #endif
+}
+
+extension CodeView {
+
+  private func performPairTextInsertion(_ text: String) -> Bool {
+    guard text.utf16.count == 1,
+          pairEditing.insertsPairs || pairEditing.skipsClosers,
+          let codeStorage = optCodeStorage,
+          let textContentStorage = optTextContentStorage
+    else { return false }
+
+    if pairEditing.skipsClosers,
+       let pair = CodeEditingContext.pair(closing: text),
+       skipOverClosingPair(pair, in: codeStorage)
+    {
+      return true
+    }
+
+    guard pairEditing.insertsPairs,
+          let pair = CodeEditingContext.pair(opening: text),
+          shouldInsertPair(pair, in: codeStorage)
+    else { return false }
+
+    textContentStorage.performEditingTransaction {
+      processSelectedRanges { range in
+        if range.length > 0 && pairEditing.wrapsSelection,
+           let selectedText = codeStorage.string[range]
+        {
+          let replacement = pair.opening + selectedText + pair.closing
+          codeStorage.replaceCharacters(in: range, with: replacement)
+          return NSRange(location: range.location + pair.opening.utf16.count, length: range.length)
+        } else {
+          let replacement = pair.opening + pair.closing
+          codeStorage.replaceCharacters(in: range, with: replacement)
+          return NSRange(location: range.location + pair.opening.utf16.count, length: 0)
+        }
+      }
+    }
+
+    CodeEditorInstrumentation.record(.typing)
+    return true
+  }
+
+  private func skipOverClosingPair(_ pair: EditingPair, in codeStorage: CodeStorage) -> Bool {
+    var skipped = false
+
+#if os(macOS)
+    let ranges = selectedRanges.map { $0.rangeValue }
+#else
+    let ranges = [selectedRange]
+#endif
+    guard ranges.allSatisfy({ range in
+      range.length == 0 && character(at: range.location, in: codeStorage) == pair.closing
+    }) else { return false }
+
+    processSelectedRanges { range in
+      skipped = true
+      return NSRange(location: range.location + pair.closing.utf16.count, length: 0)
+    }
+    if skipped { CodeEditorInstrumentation.record(.typing) }
+    return skipped
+  }
+
+  private func performPairedDeletion(backward: Bool) -> Bool {
+    guard pairEditing.deletesEmptyPairs,
+          let codeStorage = optCodeStorage,
+          let textContentStorage = optTextContentStorage
+    else { return false }
+
+    var changed = false
+    textContentStorage.performEditingTransaction {
+      processSelectedRanges { range in
+        guard range.length == 0 else { return range }
+
+        if backward,
+           let pair = CodeEditingContext.pair(opening: character(before: range.location, in: codeStorage) ?? ""),
+           character(at: range.location, in: codeStorage) == pair.closing
+        {
+          let replacementRange = NSRange(location: range.location - pair.opening.utf16.count,
+                                         length: pair.opening.utf16.count + pair.closing.utf16.count)
+          codeStorage.replaceCharacters(in: replacementRange, with: "")
+          changed = true
+          return NSRange(location: replacementRange.location, length: 0)
+        }
+
+        if !backward,
+           let pair = CodeEditingContext.pair(opening: character(at: range.location, in: codeStorage) ?? ""),
+           character(at: range.location + pair.opening.utf16.count, in: codeStorage) == pair.closing
+        {
+          let replacementRange = NSRange(location: range.location,
+                                         length: pair.opening.utf16.count + pair.closing.utf16.count)
+          codeStorage.replaceCharacters(in: replacementRange, with: "")
+          changed = true
+          return NSRange(location: replacementRange.location, length: 0)
+        }
+
+        return range
+      }
+    }
+
+    if changed { CodeEditorInstrumentation.record(.typing) }
+    return changed
+  }
+
+  private func shouldInsertPair(_ pair: EditingPair, in codeStorage: CodeStorage) -> Bool {
+    let location = currentInsertionLocation
+    guard !isInCommentOrString(at: location, in: codeStorage) else { return false }
+
+    if pair.isQuote && pairEditing.pairsQuotesInCodeContextOnly {
+      let before = character(before: location, in: codeStorage)
+      let after = character(at: location, in: codeStorage)
+      if isIdentifierCharacter(before) || isIdentifierCharacter(after) { return false }
+    }
+
+    return true
+  }
+
+  private var currentInsertionLocation: Int {
+#if os(macOS)
+    selectedRange().location
+#else
+    selectedRange.location
+#endif
+  }
+
+  private func isInCommentOrString(at location: Int, in codeStorage: CodeStorage) -> Bool {
+    guard let codeStorageDelegate = codeStorage.delegate as? CodeStorageDelegate else { return false }
+    let zeroLengthRange = NSRange(location: max(0, min(location, codeStorage.length)), length: 0)
+    if codeStorageDelegate.lineMap.isWithinComment(range: zeroLengthRange) { return true }
+    if location > 0, codeStorage.tokenOnly(at: location - 1)?.token == .string { return true }
+    if codeStorage.tokenOnly(at: location)?.token == .string { return true }
+    return false
+  }
+
+  private func character(before location: Int, in codeStorage: CodeStorage) -> String? {
+    guard location > 0 else { return nil }
+    return character(at: location - 1, in: codeStorage)
+  }
+
+  private func character(at location: Int, in codeStorage: CodeStorage) -> String? {
+    guard location >= 0, location < codeStorage.length else { return nil }
+    return (codeStorage.string as NSString).substring(with: NSRange(location: location, length: 1))
+  }
+
+  private func isIdentifierCharacter(_ character: String?) -> Bool {
+    guard let character,
+          let scalar = character.unicodeScalars.first
+    else { return false }
+    return CharacterSet.alphanumerics.union(.init(charactersIn: "_")).contains(scalar)
+  }
+
+  private func triggerCompletionIfNeeded(afterInserting text: String) {
+    guard text.count == 1,
+          let trigger = text.first,
+          optLanguageService?.completionTriggerCharacters.value.contains(trigger) == true
+    else { return }
+
+    completionTask?.cancel()
+    completionTask = Task {
+#if os(macOS)
+      let location = selectedRange().location
+#else
+      let location = selectedRange.location
+#endif
+      try await computeAndShowCompletions(at: location, explicitTrigger: false, reason: .character(trigger))
+    }
+  }
 }
 
 // MARK: -
@@ -370,7 +637,7 @@ extension CodeView {
 
         let replacementRange = NSRange(location: theLine.range.location, length: 0)
         codeStorage.replaceCharacters(in: replacementRange, with: indentation.defaultIndentation)
-        return range.adjustSelection(forReplacing: replacementRange, by: 2)
+        return range.adjustSelection(forReplacing: replacementRange, by: indentation.defaultIndentation.utf16.count)
 
       }
     }
@@ -846,21 +1113,6 @@ extension CodeView {
       return false
     }
 
-    /// Check if the document has unmatched opening braces by scanning the entire text.
-    /// If there are more `{` than `}`, the document is unbalanced and we should add a `}`.
-    ///
-    func documentHasUnmatchedOpenBrace() -> Bool {
-      var depth = 0
-      for char in codeStorage.string {
-        if char == "{" {
-          depth += 1
-        } else if char == "}" {
-          depth -= 1
-        }
-      }
-      return depth > 0
-    }
-
     textContentStorage.performEditingTransaction {
       processSelectedRanges { range in
 
@@ -882,14 +1134,8 @@ extension CodeView {
             let insertText = "\n" + innerIndentString + "\n" + baseIndentString
             codeStorage.replaceCharacters(in: range, with: insertText)
             return NSRange(location: range.location + 1 + innerIndentString.count, length: 0)
-          } else if documentHasUnmatchedOpenBrace() {
-            // Document has more `{` than `}` — add a closing brace
-            let closingBrace = language.lexeme(of: .curlyBracketClose) ?? "}"
-            let insertText   = "\n" + innerIndentString + "\n" + baseIndentString + closingBrace
-            codeStorage.replaceCharacters(in: range, with: insertText)
-            return NSRange(location: range.location + 1 + innerIndentString.count, length: 0)
           } else {
-            // Document braces are balanced — just insert newline with indentation
+            // No adjacent closing brace: keep the edit local and avoid scanning or mutating the whole document.
             codeStorage.replaceCharacters(in: range, with: "\n" + innerIndentString)
             return NSRange(location: range.location + 1 + innerIndentString.count, length: 0)
           }
@@ -923,7 +1169,7 @@ extension CodeView {
       newSelected.append(newRange)
     }
 #if os(macOS)
-    if !newSelected.isEmpty { selectedRanges = newSelected.map{ NSValue(range: $0) } }
+    if !newSelected.isEmpty { selectedRanges = newSelected.reversed().map{ NSValue(range: $0) } }
 #elseif os(iOS) || os(visionOS)
     if let selection = newSelected.first { selectedRange = selection }
 #endif

@@ -218,6 +218,14 @@ final class CodeView: UITextView {
   ///
   var autoBrace: CodeEditor.AutoBraceConfiguration = .enabled
 
+  /// Xcode-like paired delimiter editing.
+  ///
+  var pairEditing: CodeEditor.PairEditingConfiguration = .xcode
+
+  /// Bracket matching behavior.
+  ///
+  var bracketMatching: CodeEditor.BracketMatchingConfiguration = .xcode
+
   /// Hook to propagate message sets upwards in the view hierarchy.
   ///
   let setMessages: (Set<TextLocated<Message>>) -> Void
@@ -275,6 +283,7 @@ final class CodeView: UITextView {
       let minHeight = max(estimatedHeight, documentVisibleRect.height)
       let newContentSize = CGSize(width: bounds.width, height: minHeight)
       if contentSize != newContentSize {
+        CodeEditorInstrumentation.record(.contentSizeWrite)
         contentSize = newContentSize
       }
     }
@@ -478,6 +487,11 @@ final class CodeView: UITextView {
     minimapView.addSubview(documentVisibleBox)
     self.documentVisibleBox = documentVisibleBox
 
+    addGestureRecognizer(UIHoverGestureRecognizer(target: self, action: #selector(handleEditorHover(_:))))
+#if os(iOS)
+    addInteraction(UIPointerInteraction(delegate: self))
+#endif
+
     // We need to check whether we need to look up completions or cancel a running completion process after every text
     // change.  We also need to invalidate the views of all in the meantime invalidated message views.
     textDidChangeObserver
@@ -485,15 +499,16 @@ final class CodeView: UITextView {
                                                object: self,
                                                queue: .main){ [weak self] _ in
 
+        guard let self else { return }
         // Notify background tokenizer of edit to pause during active typing
-        self?.backgroundTokenizer.notifyEdit()
+        self.backgroundTokenizer.notifyEdit()
 
-        self?.invalidateDocumentHeightCache()
+        self.invalidateDocumentHeightCache()
         // NOTE: Removed computeDocumentHeightsAsync() - heights are set by performFullDocumentLayout()
-        self?.considerCompletionFor(range: self!.rangeForUserCompletion)
-        self?.invalidateMessageViews(withIDs: self!.codeStorageDelegate.lastInvalidatedMessageIDs)
-        self?.gutterView?.invalidateGutter()
-        self?.minimapGutterView?.invalidateGutter()
+        self.considerCompletionFor(range: self.rangeForUserCompletion)
+        self.invalidateMessageViews(withIDs: self.codeStorageDelegate.lastInvalidatedMessageIDs)
+        self.gutterView?.invalidateGutter()
+        self.minimapGutterView?.invalidateGutter()
       }
 
     Task {
@@ -539,8 +554,34 @@ final class CodeView: UITextView {
     fatalError("init(coder:) has not been implemented")
   }
 
-  deinit {
+  func shutdown() {
+    viewportChangeWorkItem?.cancel()
+    viewportChangeWorkItem = nil
+    resizeEndWorkItem?.cancel()
+    resizeEndWorkItem = nil
+    if completionTask != nil {
+      completionTask?.cancel()
+      completionTask = nil
+      CodeEditorInstrumentation.record(.completionTaskCancelled)
+    }
+    dismissCompletion()
+    backgroundTokenizer.stop()
+    codeStorageDelegate.flushPendingSetText()
+    diagnosticsCancellable = nil
+    eventsCancellable = nil
     if let observer = textDidChangeObserver { NotificationCenter.default.removeObserver(observer) }
+    textDidChangeObserver = nil
+    observations.removeAll()
+    let languageService = codeStorageDelegate.languageService
+    Task {
+      try await languageService?.closeDocument()
+      try await languageService?.stop()
+    }
+    CodeEditorInstrumentation.record(.lifecycle)
+  }
+
+  deinit {
+    shutdown()
   }
 
   // NB: Trying to do tiling and minimap adjusting on specific events, instead of here, leads to lots of tricky corner
@@ -622,6 +663,7 @@ final class CodeView: UITextView {
   /// PERF: Keep this lightweight; scrolling must remain on the fast path.
   func userDidScroll() {
     // Pause background tokenization during active scrolling to keep scrolling responsive.
+    CodeEditorInstrumentation.record(.scroll)
     backgroundTokenizer.notifyEdit()
     guard !isResizing else { return }
 
@@ -653,16 +695,7 @@ final class CodeView: UITextView {
       // This allows progressive height refinement as the user scrolls and new lines are measured.
       if self.viewLayout.wrapText {
         self.updateDocumentHeightsFromLineCount()
-        // Update frame/content size if height changed significantly (prevents jitter during scroll)
-        if let estimatedHeight = self.cachedCodeHeight {
-          let currentHeight = self.frame.size.height
-          let minHeight = max(estimatedHeight, self.documentVisibleRect.height)
-          // Only update if difference is significant (more than one line height)
-          if abs(currentHeight - minHeight) > self.theme.font.lineHeight {
-            self.frame.size.height = minHeight
-            self.contentSize = CGSize(width: self.bounds.width, height: minHeight)
-          }
-        }
+        self.hasPendingLayoutWork = true
       }
     }
 
@@ -909,6 +942,10 @@ final class CodeViewDelegate: NSObject, UITextViewDelegate {
 
   func textViewDidChange(_ textView: UITextView) { textDidChange?(textView) }
 
+  func textViewDidEndEditing(_ textView: UITextView) {
+    (textView as? CodeView)?.codeStorageDelegate.flushPendingSetText()
+  }
+
   func textViewDidChangeSelection(_ textView: UITextView) {
     guard let codeView = textView as? CodeView else { return }
 
@@ -1026,6 +1063,23 @@ final class CodeView: NSTextView {
   ///
   private let viewportChangeDebounceInterval: TimeInterval = 0.05
 
+  /// Last bounds size that was tiled.
+  ///
+  /// PERF: Avoid calling `tile()` on every scroll tick (NSScrollView changes its bounds origin while scrolling).
+  private var lastTiledBoundsSize: CGSize = .zero
+
+  /// Last document height that was tiled.
+  ///
+  private var lastTiledDocumentHeight: CGFloat = 0
+
+  /// Last layout configuration that was tiled.
+  ///
+  private var lastTiledViewLayout: CodeEditor.LayoutConfiguration = .standard
+
+  /// Last font width that was tiled (affects gutter sizing).
+  ///
+  private var lastTiledFontWidth: CGFloat = 0
+
   /// Contains the line on which the insertion point was located, the last time the selection range got set (if the
   /// selection was an insertion point at all; i.e., it's length was 0).
   ///
@@ -1093,6 +1147,14 @@ final class CodeView: NSTextView {
   /// The current auto-brace configuration.
   ///
   var autoBrace: CodeEditor.AutoBraceConfiguration = .enabled
+
+  /// Xcode-like paired delimiter editing.
+  ///
+  var pairEditing: CodeEditor.PairEditingConfiguration = .xcode
+
+  /// Bracket matching behavior.
+  ///
+  var bracketMatching: CodeEditor.BracketMatchingConfiguration = .xcode
 
   /// Hook to propagate message sets upwards in the view hierarchy.
   ///
@@ -1415,14 +1477,15 @@ final class CodeView: NSTextView {
                                                object: self,
                                                queue: .main) { [weak self] _ in
 
+        guard let self else { return }
         // Notify background tokenizer of edit to pause during active typing
-        self?.backgroundTokenizer.notifyEdit()
+        self.backgroundTokenizer.notifyEdit()
 
 //        self?.infoPopover?.close()
-        self?.invalidateDocumentHeightCache()
+        self.invalidateDocumentHeightCache()
         // NOTE: Heights will be updated incrementally by TextKit 2 as needed
-        self?.considerCompletionFor(range: self!.rangeForUserCompletion)
-        self?.invalidateMessageViews(withIDs: self!.codeStorageDelegate.lastInvalidatedMessageIDs)
+        self.considerCompletionFor(range: self.rangeForUserCompletion)
+        self.invalidateMessageViews(withIDs: self.codeStorageDelegate.lastInvalidatedMessageIDs)
       }
 
     // Popups should disappear on cursor change.
@@ -1479,10 +1542,38 @@ final class CodeView: NSTextView {
     fatalError("init(coder:) has not been implemented")
   }
 
-  deinit {
+  func shutdown() {
+    viewportChangeWorkItem?.cancel()
+    viewportChangeWorkItem = nil
+    if completionTask != nil {
+      completionTask?.cancel()
+      completionTask = nil
+      CodeEditorInstrumentation.record(.completionTaskCancelled)
+    }
+    completionPanel.close()
+    infoPopover?.close()
+    infoPopover = nil
+    backgroundTokenizer.stop()
+    codeStorageDelegate.flushPendingSetText()
+    diagnosticsCancellable = nil
+    eventsCancellable = nil
     if let observer = frameChangedNotificationObserver { NotificationCenter.default.removeObserver(observer) }
     if let observer = didChangeNotificationObserver { NotificationCenter.default.removeObserver(observer) }
     if let observer = didChangeSelectionNotificationObserver { NotificationCenter.default.removeObserver(observer) }
+    frameChangedNotificationObserver = nil
+    didChangeNotificationObserver = nil
+    didChangeSelectionNotificationObserver = nil
+    observations.removeAll()
+    let languageService = codeStorageDelegate.languageService
+    Task {
+      try await languageService?.closeDocument()
+      try await languageService?.stop()
+    }
+    CodeEditorInstrumentation.record(.lifecycle)
+  }
+
+  deinit {
+    shutdown()
   }
 
 
@@ -1542,13 +1633,33 @@ final class CodeView: NSTextView {
       super.layout()
       return
     }
-    tile()
-    if viewLayout.showMinimap {
-      adjustScrollPositionOfMinimap()
+
+    let currentBoundsSize = enclosingScrollView?.contentView.bounds.size ?? bounds.size
+    let currentDocumentHeight = cachedCodeHeight ?? frame.height
+    let currentFontWidth = (font ?? theme.font).maximumHorizontalAdvancement
+    let needsTiling = currentBoundsSize != lastTiledBoundsSize
+      || abs(currentDocumentHeight - lastTiledDocumentHeight) > 0.5
+      || viewLayout != lastTiledViewLayout
+      || abs(currentFontWidth - lastTiledFontWidth) > 0.0001
+      || hasPendingLayoutWork
+
+    if needsTiling {
+      hasPendingLayoutWork = false
+      tile()
+      if viewLayout.showMinimap {
+        adjustScrollPositionOfMinimap()
+      }
+      lastTiledBoundsSize = currentBoundsSize
+      lastTiledDocumentHeight = cachedCodeHeight ?? frame.height
+      lastTiledViewLayout = viewLayout
+      lastTiledFontWidth = currentFontWidth
     }
+
     super.layout()
-    gutterView?.needsDisplay = true
-    if viewLayout.showMinimap {
+    if needsTiling {
+      gutterView?.needsDisplay = true
+    }
+    if needsTiling && viewLayout.showMinimap {
       minimapGutterView?.needsDisplay = true
     }
   }
@@ -1558,6 +1669,7 @@ final class CodeView: NSTextView {
   /// PERF: Keep this lightweight; scrolling must remain on the fast path.
   func userDidScroll() {
     // Pause background tokenization during active scrolling to keep scrolling responsive.
+    CodeEditorInstrumentation.record(.scroll)
     backgroundTokenizer.notifyEdit()
     guard !isResizing else { return }
 
@@ -1589,15 +1701,7 @@ final class CodeView: NSTextView {
       // This allows progressive height refinement as the user scrolls and new lines are measured.
       if self.viewLayout.wrapText {
         self.updateDocumentHeightsFromLineCount()
-        // Update frame if height changed significantly (prevents jitter during scroll)
-        if let estimatedHeight = self.cachedCodeHeight {
-          let currentHeight = self.frame.size.height
-          let minHeight = max(estimatedHeight, self.documentVisibleRect.height)
-          // Only update if difference is significant (more than one line height)
-          if abs(currentHeight - minHeight) > self.theme.font.lineHeight {
-            self.setFrameSize(NSSize(width: self.frame.size.width, height: minHeight))
-          }
-        }
+        self.hasPendingLayoutWork = true
       }
     }
 
@@ -1740,6 +1844,7 @@ final class CodeView: NSTextView {
   }
 
   override func setFrameSize(_ newSize: NSSize) {
+    CodeEditorInstrumentation.record(.setFrameSize)
     // During resize or tiling, just pass through to avoid expensive calculations and recursion
     if isResizing || isTiling {
       super.setFrameSize(newSize)
@@ -1904,12 +2009,22 @@ final class CodeViewDelegate: NSObject, NSTextViewDelegate {
     textDidChange?(textView)
   }
 
+  func textDidEndEditing(_ notification: Notification) {
+    guard let codeView = notification.object as? CodeView else { return }
+    codeView.codeStorageDelegate.flushPendingSetText()
+  }
+
   func textViewDidChangeSelection(_ notification: Notification) {
     guard let textView = notification.object as? NSTextView else { return }
 
     // Close completion panel when selection changes (user clicked or moved cursor)
     // This is only called for selection changes NOT triggered by text insertion
     if let codeView = textView as? CodeView, codeView.completionPanel.isVisible {
+      if codeView.completionTask != nil {
+        codeView.completionTask?.cancel()
+        codeView.completionTask = nil
+        CodeEditorInstrumentation.record(.completionTaskCancelled)
+      }
       codeView.completionPanel.close()
     }
 
@@ -2154,6 +2269,7 @@ extension CodeView {
       // Update content size for scroll view
       let newContentSize = CGSize(width: bounds.width, height: minHeight)
       if contentSize != newContentSize {
+        CodeEditorInstrumentation.record(.contentSizeWrite)
         contentSize = newContentSize
       }
 #elseif os(macOS)
@@ -2221,6 +2337,7 @@ extension CodeView {
   ///
   @MainActor
   private func tile() {
+    CodeEditorInstrumentation.record(.tile)
     guard let codeContainer = optTextContainer as? CodeContainer else { return }
 
     // Prevent recursive layout cycles - if we're already tiling, mark pending work and return
@@ -2387,6 +2504,7 @@ extension CodeView {
     // UITextView inherits from UIScrollView, so contentSize determines the scrollable area
     let newContentSize = CGSize(width: bounds.width, height: minimumHeight)
     if contentSize != newContentSize {
+      CodeEditorInstrumentation.record(.contentSizeWrite)
       contentSize = newContentSize
     }
 #endif
@@ -2436,20 +2554,7 @@ extension CodeView {
       // This allows progressive height refinement as the user scrolls and new lines are measured
       if self.viewLayout.wrapText {
         self.updateDocumentHeightsFromLineCount()
-        // Update frame if height changed significantly (prevents jitter during scroll)
-        if let estimatedHeight = self.cachedCodeHeight {
-          let currentHeight = self.frame.size.height
-          let minHeight = max(estimatedHeight, self.documentVisibleRect.height)
-          // Only update if difference is significant (more than one line height)
-          if abs(currentHeight - minHeight) > self.theme.font.lineHeight {
-#if os(macOS)
-            self.setFrameSize(NSSize(width: self.frame.size.width, height: minHeight))
-#else
-            self.frame.size.height = minHeight
-            self.contentSize = CGSize(width: self.bounds.width, height: minHeight)
-#endif
-          }
-        }
+        self.hasPendingLayoutWork = true
       }
     }
     if let workItem = viewportChangeWorkItem {

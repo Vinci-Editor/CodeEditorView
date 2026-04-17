@@ -108,19 +108,19 @@ public struct Theme: Identifiable {
     didSet { id = UUID() }
   }
 
-  /// The colour for function and method calls.
+  /// The colour for function and method names.
   ///
   public var functionColour: OSColor {
     didSet { id = UUID() }
   }
 
-  /// The colour for function parameters.
+  /// The colour for parameter names.
   ///
   public var parameterColour: OSColor {
     didSet { id = UUID() }
   }
 
-  /// The colour for macros.
+  /// The colour for macro names.
   ///
   public var macroColour: OSColor {
     didSet { id = UUID() }
@@ -211,6 +211,40 @@ extension Theme: Equatable {
   public static func ==(lhs: Theme, rhs: Theme) -> Bool { lhs.id == rhs.id }
 }
 
+extension Theme {
+
+  /// Compare the logical visual contents of a theme instead of its mutation identity.
+  ///
+  /// SwiftUI callers often rebuild equivalent `Theme` values during normal view updates. The public `Equatable`
+  /// conformance intentionally remains identity-based, but editor view updates need value semantics so identical
+  /// themes don't repeatedly invalidate TextKit layout and rendering.
+  func isVisuallyEquivalent(to other: Theme) -> Bool {
+    colourScheme == other.colourScheme
+      && fontName == other.fontName
+      && fontSize == other.fontSize
+      && textColour.isEqual(other.textColour)
+      && commentColour.isEqual(other.commentColour)
+      && stringColour.isEqual(other.stringColour)
+      && characterColour.isEqual(other.characterColour)
+      && numberColour.isEqual(other.numberColour)
+      && identifierColour.isEqual(other.identifierColour)
+      && operatorColour.isEqual(other.operatorColour)
+      && keywordColour.isEqual(other.keywordColour)
+      && symbolColour.isEqual(other.symbolColour)
+      && typeColour.isEqual(other.typeColour)
+      && fieldColour.isEqual(other.fieldColour)
+      && caseColour.isEqual(other.caseColour)
+      && functionColour.isEqual(other.functionColour)
+      && parameterColour.isEqual(other.parameterColour)
+      && macroColour.isEqual(other.macroColour)
+      && backgroundColour.isEqual(other.backgroundColour)
+      && currentLineColour.isEqual(other.currentLineColour)
+      && selectionColour.isEqual(other.selectionColour)
+      && cursorColour.isEqual(other.cursorColour)
+      && invisiblesColour.isEqual(other.invisiblesColour)
+  }
+}
+
 /// A theme catalog indexing themes by name
 ///
 typealias Themes = [String: Theme]
@@ -233,9 +267,9 @@ extension Theme {
             typeColour: OSColor(red: 0.36, green: 0.85, blue: 1.0, alpha: 1.0),
             fieldColour: OSColor(red: 0.63, green: 0.40, blue: 0.90, alpha: 1.0),
             caseColour: OSColor(red: 0.82, green: 0.66, blue: 1.0, alpha: 1.0),
-            functionColour: OSColor(red: 0.42, green: 0.71, blue: 0.93, alpha: 1.0),    // Sky blue
-            parameterColour: OSColor(red: 0.87, green: 0.87, blue: 0.88, alpha: 1.0),  // Same as text
-            macroColour: OSColor(red: 1.0, green: 0.58, blue: 0.0, alpha: 1.0),         // Orange
+            functionColour: OSColor(red: 0.42, green: 0.71, blue: 0.93, alpha: 1.0),
+            parameterColour: OSColor(red: 0.87, green: 0.87, blue: 0.88, alpha: 1.0),
+            macroColour: OSColor(red: 1.0, green: 0.58, blue: 0.0, alpha: 1.0),
             backgroundColour: OSColor(red: 0.16, green: 0.16, blue: 0.18, alpha: 1.0),
             currentLineColour: OSColor(red: 0.19, green: 0.20, blue: 0.22, alpha: 1.0),
             selectionColour: OSColor(red: 0.40, green: 0.44, blue: 0.51, alpha: 1.0),
@@ -258,9 +292,9 @@ extension Theme {
             typeColour: OSColor(red: 0.04, green: 0.29, blue: 0.46, alpha: 1.0),
             fieldColour: OSColor(red: 0.36, green: 0.15, blue: 0.60, alpha: 1.0),
             caseColour: OSColor(red: 0.18, green: 0.05, blue: 0.43, alpha: 1.0),
-            functionColour: OSColor(red: 0.0, green: 0.40, blue: 0.80, alpha: 1.0),     // Blue
-            parameterColour: OSColor(red: 0.15, green: 0.15, blue: 0.15, alpha: 1.0),  // Same as text
-            macroColour: OSColor(red: 0.58, green: 0.31, blue: 0.05, alpha: 1.0),       // Orange-brown
+            functionColour: OSColor(red: 0.0, green: 0.40, blue: 0.80, alpha: 1.0),
+            parameterColour: OSColor(red: 0.15, green: 0.15, blue: 0.15, alpha: 1.0),
+            macroColour: OSColor(red: 0.58, green: 0.31, blue: 0.05, alpha: 1.0),
             backgroundColour: OSColor(red: 1.0, green: 1.0, blue: 1.0, alpha: 1.0),
             currentLineColour: OSColor(red: 0.93, green: 0.96, blue: 1.0, alpha: 1.0),
             selectionColour: OSColor(red: 0.73, green: 0.84, blue: 0.99, alpha: 1.0),

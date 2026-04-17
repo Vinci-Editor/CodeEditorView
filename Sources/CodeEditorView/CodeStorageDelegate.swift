@@ -230,6 +230,11 @@ class CodeStorageDelegate: NSObject, NSTextStorageDelegate, @unchecked Sendable 
   /// Work item for debouncing setText calls to avoid copying entire text on every keystroke.
   ///
   private var pendingSetTextWorkItem: DispatchWorkItem?
+  private var pendingSetTextValue: String?
+
+  /// Monotonic UTF-16 document version used to drop stale async results.
+  ///
+  private(set) var documentVersion: Int = 0
 
   /// Debounce interval for setText calls. Higher values reduce string copy frequency but delay binding sync.
   /// 300ms is imperceptible to users while significantly reducing work during rapid typing.
@@ -261,9 +266,25 @@ class CodeStorageDelegate: NSObject, NSTextStorageDelegate, @unchecked Sendable 
   }
 
   deinit {
+    flushPendingSetText()
     Task { [languageService] in
       try await languageService?.stop()
     }
+  }
+
+  func flushPendingSetText() {
+    guard let pendingSetTextValue else { return }
+    pendingSetTextWorkItem?.cancel()
+    pendingSetTextWorkItem = nil
+    self.pendingSetTextValue = nil
+    CodeEditorInstrumentation.record(.setTextFlushed)
+    setText(pendingSetTextValue)
+  }
+
+  func cancelPendingSetText() {
+    pendingSetTextWorkItem?.cancel()
+    pendingSetTextWorkItem = nil
+    pendingSetTextValue = nil
   }
 
 
@@ -356,7 +377,7 @@ class CodeStorageDelegate: NSObject, NSTextStorageDelegate, @unchecked Sendable 
     let cache = ensureCache(for: viewportLines)
 
     let tokens = cache.tokens
-    guard !tokens.isEmpty else { return true }
+    guard !tokens.isEmpty else { return false }
 
     let start = range.location
     let end = range.max
@@ -407,6 +428,7 @@ class CodeStorageDelegate: NSObject, NSTextStorageDelegate, @unchecked Sendable 
   /// This implies stopping any already running language service first. We don't do anything if target language
   /// configuration equals the current one.
   ///
+  @MainActor
   func change(language: LanguageConfiguration, for codeStorage: CodeStorage) async throws {
     let currentLanguage = self.language
     guard language != currentLanguage else { return }
@@ -469,6 +491,7 @@ class CodeStorageDelegate: NSObject, NSTextStorageDelegate, @unchecked Sendable 
 
     // Tree-sitter highlight caches are invalid after any character edit.
     treeSitterHighlightCaches.removeAll()
+    documentVersion += 1
 
     // Keep tree-sitter parse tree in sync with the text storage.
     // This is incremental for small edits and falls back to a full parse for large replacements.
@@ -538,25 +561,7 @@ class CodeStorageDelegate: NSObject, NSTextStorageDelegate, @unchecked Sendable 
     var editedRange = editedRange
     var delta       = delta
     if processingOneCharacterAddition {
-
-      tokenCompletionCharacters = tokenCompletion(for: codeStorage, at: editedRange.location)
-      if tokenCompletionCharacters > 0 {
-
-        // Update line map with completion characters.
-        lineMap.updateAfterEditing(string: cachedString, range: NSRange(location: editedRange.location + 1,
-                                                                        length: tokenCompletionCharacters),
-                                   changeInLength: tokenCompletionCharacters)
-
-        // Adjust the editing range and delta
-        editedRange.length += tokenCompletionCharacters
-        delta              += tokenCompletionCharacters
-
-        // Re-tokenise the whole lot with the completion characters included
-        let extraHighlighting = tokenise(range: editedRange, in: textStorage)
-        highlightingRange = highlightingRange.union(extraHighlighting.affectedRange)
-        highlightingLines += extraHighlighting.lines
-
-      }
+      tokenCompletionCharacters = 0
     }
 
     // The range within which highlighting has to be re-rendered.
@@ -588,14 +593,16 @@ class CodeStorageDelegate: NSObject, NSTextStorageDelegate, @unchecked Sendable 
     if processingOneCharacterAddition {
       // Debounce single-character edits to reduce string copies during rapid typing
       pendingSetTextWorkItem?.cancel()
-      let text = cachedString
+      pendingSetTextValue = cachedString
       pendingSetTextWorkItem = DispatchWorkItem { [weak self] in
-        self?.setText(text)
+        self?.flushPendingSetText()
       }
+      CodeEditorInstrumentation.record(.setTextScheduled)
       DispatchQueue.main.asyncAfter(deadline: .now() + setTextDebounceInterval,
                                     execute: pendingSetTextWorkItem!)
     } else if !processingStringReplacement {
       // For larger edits (paste, undo), call immediately
+      cancelPendingSetText()
       setText(cachedString)
     }
     // For processingStringReplacement (initial load), skip - the string is already being set through another path
@@ -631,6 +638,7 @@ class CodeStorageDelegate: NSObject, NSTextStorageDelegate, @unchecked Sendable 
 
     let skipDidChangeDocument = skipNextChangeNotificationToLanguageService
     skipNextChangeNotificationToLanguageService = false
+    let capturedVersion = documentVersion
 
     // Capture references safely for async task
     nonisolated(unsafe) let unsafeLanguageService = languageService
@@ -659,7 +667,12 @@ class CodeStorageDelegate: NSObject, NSTextStorageDelegate, @unchecked Sendable 
                                                 locationService: unsafeSelf.lineMapLocationConverter)
       }
 
-      await unsafeSelf.requestSemanticTokens(for: lines, in: unsafeTextStorage)
+      guard unsafeSelf.documentVersion == capturedVersion else {
+        CodeEditorInstrumentation.record(.staleAsyncResultDropped)
+        return
+      }
+
+      await unsafeSelf.requestSemanticTokens(for: lines, in: unsafeTextStorage, documentVersion: capturedVersion)
     }
 
   }
@@ -756,6 +769,7 @@ extension CodeStorageDelegate {
     {
 
       if let lineRange = lineMap.lookup(line: line)?.range {
+        let existingMessages = lineMap.lookup(line: line)?.info?.messages
 
         if visualDebugging {
 
@@ -844,6 +858,8 @@ extension CodeStorageDelegate {
         // Retain computed line information
         lineInfo.commentDepthEnd      = commentDepth
         lineInfo.curlyBracketDepthEnd = curlyBracketDepth
+        lineInfo.messages             = existingMessages
+        lineInfo.tokenizationState    = .tokenized
         lineMap.setInfoOf(line: line, to: lineInfo)
       }
     }
@@ -955,13 +971,18 @@ extension CodeStorageDelegate {
   ///     textStorage: The text storage whose contents is being tokenised.
   ///
   @MainActor
-  func requestSemanticTokens(for lines: Range<Int>, in textStorage: NSTextStorage) async {
+  func requestSemanticTokens(for lines: Range<Int>, in textStorage: NSTextStorage, documentVersion requestedVersion: Int? = nil) async {
     guard let firstLine = lines.first else { return }
+    let expectedVersion = requestedVersion ?? documentVersion
 
     do {
       if let semanticTokens = try await languageService?.tokens(for: lines) {
 
         try Task.checkCancellation()
+        guard documentVersion == expectedVersion else {
+          CodeEditorInstrumentation.record(.staleAsyncResultDropped)
+          return
+        }
 
         guard lines.count == semanticTokens.count else {
           logger.trace("Language service returned an array of incorrect length; expected \(lines.count), but got \(semanticTokens.count)")

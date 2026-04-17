@@ -30,7 +30,7 @@ public protocol LocationService: LocationConverter, Sendable {
 
 /// Indicates the reason for querying code completions.
 ///  
-public enum CompletionTriggerReason {
+public enum CompletionTriggerReason: Sendable {
 
   /// Completion was triggered by typing a character of an identifier or by explicitly requesting completion.
   ///

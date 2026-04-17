@@ -63,6 +63,8 @@ public struct CodeEditor {
   @Environment(\.codeEditorLayoutConfiguration)      private var layoutConfiguration
   @Environment(\.codeEditorIndentationConfiguration) private var indentationConfiguration
   @Environment(\.codeEditorAutoBraceConfiguration)   private var autoBraceConfiguration
+  @Environment(\.codeEditorPairEditingConfiguration) private var pairEditingConfiguration
+  @Environment(\.codeEditorBracketMatchingConfiguration) private var bracketMatchingConfiguration
   @Environment(\.codeEditorSetActions)               private var setActions
   @Environment(\.codeEditorSetInfo)                  private var setInfo
 
@@ -273,6 +275,74 @@ extension CodeEditor {
 extension EnvironmentValues {
 
   @Entry public var codeEditorAutoBraceConfiguration: CodeEditor.AutoBraceConfiguration = .enabled
+}
+
+// MARK: Pair editing configuration
+
+extension CodeEditor {
+
+  public struct PairEditingConfiguration: Equatable, Sendable {
+    public var insertsPairs: Bool
+    public var skipsClosers: Bool
+    public var deletesEmptyPairs: Bool
+    public var wrapsSelection: Bool
+    public var pairsQuotesInCodeContextOnly: Bool
+
+    public init(insertsPairs: Bool = true,
+                skipsClosers: Bool = true,
+                deletesEmptyPairs: Bool = true,
+                wrapsSelection: Bool = true,
+                pairsQuotesInCodeContextOnly: Bool = true)
+    {
+      self.insertsPairs = insertsPairs
+      self.skipsClosers = skipsClosers
+      self.deletesEmptyPairs = deletesEmptyPairs
+      self.wrapsSelection = wrapsSelection
+      self.pairsQuotesInCodeContextOnly = pairsQuotesInCodeContextOnly
+    }
+
+    public static let xcode = PairEditingConfiguration()
+    public static let disabled = PairEditingConfiguration(insertsPairs: false,
+                                                          skipsClosers: false,
+                                                          deletesEmptyPairs: false,
+                                                          wrapsSelection: false,
+                                                          pairsQuotesInCodeContextOnly: false)
+  }
+}
+
+extension EnvironmentValues {
+
+  @Entry public var codeEditorPairEditingConfiguration: CodeEditor.PairEditingConfiguration = .xcode
+}
+
+// MARK: Bracket matching configuration
+
+extension CodeEditor {
+
+  public struct BracketMatchingConfiguration: Equatable, Sendable {
+    public var caretAdjacentMatching: Bool
+    public var commandHoverMatching: Bool
+    public var scrollToOffscreenMatch: Bool
+
+    public init(caretAdjacentMatching: Bool = true,
+                commandHoverMatching: Bool = true,
+                scrollToOffscreenMatch: Bool = false)
+    {
+      self.caretAdjacentMatching = caretAdjacentMatching
+      self.commandHoverMatching = commandHoverMatching
+      self.scrollToOffscreenMatch = scrollToOffscreenMatch
+    }
+
+    public static let xcode = BracketMatchingConfiguration()
+    public static let disabled = BracketMatchingConfiguration(caretAdjacentMatching: false,
+                                                              commandHoverMatching: false,
+                                                              scrollToOffscreenMatch: false)
+  }
+}
+
+extension EnvironmentValues {
+
+  @Entry public var codeEditorBracketMatchingConfiguration: CodeEditor.BracketMatchingConfiguration = .xcode
 }
 
 
@@ -654,15 +724,25 @@ extension CodeEditor: UIViewRepresentable {
     if abs(position.verticalScrollPosition - textView.verticalScrollPosition) > 0.0001 {
       textView.verticalScrollPosition = position.verticalScrollPosition
     }
-    if theme.id != codeView.theme.id { codeView.theme = theme }
+    if !theme.isVisuallyEquivalent(to: codeView.theme) {
+      CodeEditorInstrumentation.record(.themeApplied)
+      codeView.theme = theme
+    }
     if definitiveLayout != codeView.viewLayout { codeView.viewLayout = definitiveLayout }
     if indentationConfiguration != codeView.indentation { codeView.indentation = indentationConfiguration }
     if autoBraceConfiguration != codeView.autoBrace { codeView.autoBrace = autoBraceConfiguration }
+    if pairEditingConfiguration != codeView.pairEditing { codeView.pairEditing = pairEditingConfiguration }
+    if bracketMatchingConfiguration != codeView.bracketMatching { codeView.bracketMatching = bracketMatchingConfiguration }
     // Equality on language configurations implies the same name and the same language service.
     if language != codeView.language {
       codeView.language                 = language
       context.coordinator.info.language = language.name
     }
+  }
+
+  public static func dismantleUIView(_ uiView: UITextView, coordinator: Coordinator) {
+    (uiView as? CodeView)?.shutdown()
+    coordinator.cleanup()
   }
 
   public func makeCoordinator() -> Coordinator {
@@ -676,6 +756,11 @@ extension CodeEditor: UIViewRepresentable {
 	  public final class Coordinator: _Coordinator {
 	    // Update of `self.text` happens in `CodeStorageDelegate` — see [Note Propagating text changes into SwiftUI].
 	    func textDidChange(_ textView: UITextView) { }
+
+    func cleanup() {
+      actions = Actions()
+      CodeEditorInstrumentation.record(.lifecycle)
+    }
 
     func selectionDidChange(_ textView: UITextView) {
       guard !updatingView else { return }
@@ -780,12 +865,7 @@ extension CodeEditor: NSViewRepresentable {
     context.coordinator.boundsChangedNotificationObserver
       = NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification,
                                                object: scrollView.contentView,
-                                               queue: .main){ [weak scrollView, weak codeView] _ in
-
-          // FIXME: we would like to get less fine-grained updates here, but `NSScrollView.didEndLiveScrollNotification` doesn't happen when moving the cursor around
-          if let scrollView {
-            context.coordinator.scrollPositionDidChange(scrollView)
-          }
+                                               queue: .main){ [weak codeView] _ in
 
           // Keep minimap/viewport-driven work in sync with scrolling without driving SwiftUI updates.
           codeView?.adjustScrollPositionOfMinimap()
@@ -793,6 +873,11 @@ extension CodeEditor: NSViewRepresentable {
 
           // Dismiss completion panel on scroll
           if let codeView, codeView.completionPanel.isVisible {
+            if codeView.completionTask != nil {
+              codeView.completionTask?.cancel()
+              codeView.completionTask = nil
+              CodeEditorInstrumentation.record(.completionTaskCancelled)
+            }
             codeView.completionPanel.close()
           }
         }
@@ -820,9 +905,9 @@ extension CodeEditor: NSViewRepresentable {
     }
     coordinator.extraActionsCancellable = language.languageService?.extraActions
       .receive(on: DispatchQueue.main)
-      .sink { [coordinator] actions in
+      .sink { [weak coordinator] actions in
 
-        coordinator.actions.language.extraActions = actions
+        coordinator?.actions.language.extraActions = actions
       }
 
     return scrollView
@@ -834,8 +919,6 @@ extension CodeEditor: NSViewRepresentable {
     defer {
       context.coordinator.updatingView = false
     }
-
-    codeView.breakUndoCoalescing()
 
     let theme      = context.environment.codeEditorTheme,
         selections = position.selections.map{ NSValue(range: $0) }
@@ -879,10 +962,15 @@ extension CodeEditor: NSViewRepresentable {
     if abs(position.verticalScrollPosition - scrollView.verticalScrollPosition) > 0.0001 {
       scrollView.verticalScrollPosition = position.verticalScrollPosition
     }
-    if theme.id != codeView.theme.id { codeView.theme = theme }
+    if !theme.isVisuallyEquivalent(to: codeView.theme) {
+      CodeEditorInstrumentation.record(.themeApplied)
+      codeView.theme = theme
+    }
     if definitiveLayout != codeView.viewLayout { codeView.viewLayout = definitiveLayout }
     if indentationConfiguration != codeView.indentation { codeView.indentation = indentationConfiguration }
     if autoBraceConfiguration != codeView.autoBrace { codeView.autoBrace = autoBraceConfiguration }
+    if pairEditingConfiguration != codeView.pairEditing { codeView.pairEditing = pairEditingConfiguration }
+    if bracketMatchingConfiguration != codeView.bracketMatching { codeView.bracketMatching = bracketMatchingConfiguration }
     // Equality on language configurations implies the same name and the same language service.
 	    if language != codeView.language {
 	
@@ -898,14 +986,19 @@ extension CodeEditor: NSViewRepresentable {
         }
         coordinator.extraActionsCancellable = language.languageService?.extraActions
           .receive(on: DispatchQueue.main)
-          .sink { [coordinator] actions in
+          .sink { [weak coordinator] actions in
 
-            coordinator.actions.language.extraActions = actions
+            coordinator?.actions.language.extraActions = actions
           }
 
 	      }
 	    }
 	  }
+
+  public static func dismantleNSView(_ nsView: NSScrollView, coordinator: Coordinator) {
+    (nsView.documentView as? CodeView)?.shutdown()
+    coordinator.cleanup()
+  }
 
   public func makeCoordinator() -> Coordinator {
     return Coordinator(text: $text,
@@ -921,8 +1014,19 @@ extension CodeEditor: NSViewRepresentable {
 	    var breakUndoCoalescingCancellable:    Cancellable?
 	
 	    deinit {
-	      if let observer = boundsChangedNotificationObserver { NotificationCenter.default.removeObserver(observer) }
+	      cleanup()
 	    }
+
+    func cleanup() {
+      if let observer = boundsChangedNotificationObserver {
+        NotificationCenter.default.removeObserver(observer)
+        boundsChangedNotificationObserver = nil
+      }
+      extraActionsCancellable = nil
+      breakUndoCoalescingCancellable = nil
+      actions = Actions()
+      CodeEditorInstrumentation.record(.lifecycle)
+    }
 
     // Update of `self.text` happens in `CodeStorageDelegate` — see [Note Propagating text changes into SwiftUI].
     func textDidChange(_ textView: NSTextView) { }
@@ -943,14 +1047,6 @@ extension CodeEditor: NSViewRepresentable {
       }
     }
 
-    @MainActor
-    func scrollPositionDidChange(_ scrollView: NSScrollView) {
-      guard !updatingView else { return }
-
-      if abs(position.verticalScrollPosition - scrollView.verticalScrollPosition) > 0.0001 {
-        position.verticalScrollPosition = scrollView.verticalScrollPosition
-      }
-    }
   }
 }
 
