@@ -64,8 +64,27 @@ enum CodeEditingContext {
     defaultPairs.first { $0.opening == opening }
   }
 
+  /// Curly braces are completed by Return, matching Xcode's block editing behavior.
+  static func pairForImmediateInsertion(opening: String) -> EditingPair? {
+    guard let pair = pair(opening: opening), pair.opening != "{" else { return nil }
+    return pair
+  }
+
   static func pair(closing: String) -> EditingPair? {
     defaultPairs.first { $0.closing == closing }
+  }
+
+  static func returnInsideCurlyBrace(baseIndent: Int,
+                                     indentation: CodeEditor.IndentationConfiguration,
+                                     hasClosingBraceAfter: Bool)
+  -> ReturnEditResult {
+    let innerIndent       = baseIndent + indentation.indentWidth
+    let baseIndentString  = indentation.indentation(for: baseIndent)
+    let innerIndentString = indentation.indentation(for: innerIndent)
+    let closingText       = hasClosingBraceAfter ? "" : "}"
+
+    return ReturnEditResult(replacementText: "\n" + innerIndentString + "\n" + baseIndentString + closingText,
+                            selectionOffset: 1 + innerIndentString.utf16.count)
   }
 }
 
@@ -324,7 +343,7 @@ extension CodeView {
     }
 
     guard pairEditing.insertsPairs,
-          let pair = CodeEditingContext.pair(opening: text),
+          let pair = CodeEditingContext.pairForImmediateInsertion(opening: text),
           shouldInsertPair(pair, in: codeStorage)
     else { return false }
 
@@ -1165,14 +1184,26 @@ extension CodeView {
     /// Check if the cursor is immediately after an opening curly brace.
     ///
     func isAfterOpeningCurlyBrace(at index: Int) -> Bool {
-      guard index > 0 else { return false }
+      guard index > 0,
+            character(before: index, in: codeStorage) == "{"
+      else { return false }
+
       if let token = codeStorage.tokenOnly(at: index - 1),
          token.token == .curlyBracketOpen,
          token.range.upperBound == index
       {
         return true
       }
-      return false
+
+      guard let tokeniser = LanguageConfiguration.Tokeniser(for: language.tokenDictionary,
+                                                            caseInsensitiveReservedIdentifiers: language.caseInsensitiveReservedIdentifiers),
+            let prefixRange = Range<String.Index>(NSRange(location: 0, length: index), in: codeStorage.string)
+      else { return true }
+
+      let lastToken = codeStorage.string[prefixRange]
+        .tokenise(with: tokeniser, state: LanguageConfiguration.State.tokenisingCode)
+        .last
+      return lastToken?.token == .curlyBracketOpen && lastToken?.range.upperBound == index
     }
 
     /// Get the base indentation of the line containing the given index.
@@ -1191,14 +1222,18 @@ extension CodeView {
     /// Check if there's a closing curly brace immediately after the cursor position.
     ///
     func hasClosingCurlyBraceAfter(at index: Int) -> Bool {
-      guard index < codeStorage.length else { return false }
+      guard index < codeStorage.length,
+            character(at: index, in: codeStorage) == "}"
+      else { return false }
+
       if let token = codeStorage.tokenOnly(at: index),
          token.token == .curlyBracketClose,
          token.range.lowerBound == index
       {
         return true
       }
-      return false
+
+      return true
     }
 
     textContentStorage.performEditingTransaction {
@@ -1207,26 +1242,14 @@ extension CodeView {
         let desiredIndent = if indentation.indentOnReturn { predictedIndentation(after: range.location) } else { 0 },
             indentString  = indentation.indentation(for: desiredIndent)
 
-        // Check if we're pressing enter right after a `{` and auto-brace is enabled
         if autoBrace.completeOnEnter && isAfterOpeningCurlyBrace(at: range.location) {
-          // Use the current line's indentation as base, then add one indent level for the cursor
-          let baseIndent        = baseIndentation(at: range.location)
-          let innerIndent       = baseIndent + indentation.indentWidth
-          let baseIndentString  = indentation.indentation(for: baseIndent)
-          let innerIndentString = indentation.indentation(for: innerIndent)
-
-          // Check if there's already a closing brace right after the cursor (from auto-completion)
-          if hasClosingCurlyBraceAfter(at: range.location) {
-            // There's already a `}` right after cursor — just insert newlines before it
-            // The `}` will naturally be pushed down and we add base indentation before it
-            let insertText = "\n" + innerIndentString + "\n" + baseIndentString
-            codeStorage.replaceCharacters(in: range, with: insertText)
-            return NSRange(location: range.location + 1 + innerIndentString.count, length: 0)
-          } else {
-            // No adjacent closing brace: keep the edit local and avoid scanning or mutating the whole document.
-            codeStorage.replaceCharacters(in: range, with: "\n" + innerIndentString)
-            return NSRange(location: range.location + 1 + innerIndentString.count, length: 0)
-          }
+          let edit = CodeEditingContext.returnInsideCurlyBrace(
+            baseIndent: baseIndentation(at: range.location),
+            indentation: indentation,
+            hasClosingBraceAfter: hasClosingCurlyBraceAfter(at: range.location)
+          )
+          codeStorage.replaceCharacters(in: range, with: edit.replacementText)
+          return NSRange(location: range.location + edit.selectionOffset, length: 0)
         } else {
           codeStorage.replaceCharacters(in: range, with: "\n" + indentString)
           return NSRange(location: range.location + 1 + indentString.count, length: 0)
