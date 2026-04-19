@@ -161,6 +161,20 @@ final class LineMapTests: XCTestCase {
     testEditing(string: string, into: "abc\n\n\ndefg\nhi\n", range: NSRange(location: 0, length: 0), changeInLength: -1)
   }
 
+  func testEditingResultReportsNewReplacementLinesWhenUndoRestoresNewline() {
+    let string = "a\nz"
+    let newString = "a\nb\nz"
+    var lineMap = LineMap<Void>(string: string)
+
+    let editResult = lineMap.updateAfterEditing(string: newString,
+                                                range: NSRange(location: 2, length: 2),
+                                                changeInLength: 2)
+
+    hasLineMap(newString, lineMap)
+    XCTAssertEqual(editResult.oldLineRange, 1..<2)
+    XCTAssertEqual(editResult.newLineRange, 1..<3)
+  }
+
 // Doesn't seem useful as we cannot easily harden against all such inconsistent invocations.
 //  func testEditingBogus() {
 //    let string = "\nabc\n\n\ndefg\nhi\n"
@@ -190,6 +204,8 @@ final class LineMapTests: XCTestCase {
     ("testEditingSimple", testEditingSimple),
     ("testEditingSimpleTrailing", testEditingSimpleTrailing),
     ("testEditingEmptyLines", testEditingEmptyLines),
+    ("testEditingResultReportsNewReplacementLinesWhenUndoRestoresNewline",
+     testEditingResultReportsNewReplacementLinesWhenUndoRestoresNewline),
 
 //    ("testEditingBogus", testEditingBogus),
   ]

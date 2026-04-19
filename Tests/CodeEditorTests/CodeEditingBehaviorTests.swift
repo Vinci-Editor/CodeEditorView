@@ -1,3 +1,4 @@
+import Foundation
 import XCTest
 @testable import CodeEditorView
 
@@ -53,6 +54,57 @@ final class CodeEditingBehaviorTests: XCTestCase {
     XCTAssertEqual(edit.selectionOffset, 5)
   }
 
+  func testReturnCompletionRequiresJustTypedOpeningBraceLocation() {
+    XCTAssertTrue(CodeEditingContext.shouldCompleteCurlyBraceOnReturn(
+      at: 4,
+      pendingOpeningCurlyBraceLocations: [4],
+      isAfterOpeningCurlyBrace: true,
+      completeOnEnter: true
+    ))
+
+    XCTAssertFalse(CodeEditingContext.shouldCompleteCurlyBraceOnReturn(
+      at: 4,
+      pendingOpeningCurlyBraceLocations: [],
+      isAfterOpeningCurlyBrace: true,
+      completeOnEnter: true
+    ))
+
+    XCTAssertFalse(CodeEditingContext.shouldCompleteCurlyBraceOnReturn(
+      at: 4,
+      pendingOpeningCurlyBraceLocations: [5],
+      isAfterOpeningCurlyBrace: true,
+      completeOnEnter: true
+    ))
+  }
+
+  func testReturnCompletionHonorsAutoBraceConfiguration() {
+    XCTAssertFalse(CodeEditingContext.shouldCompleteCurlyBraceOnReturn(
+      at: 4,
+      pendingOpeningCurlyBraceLocations: [4],
+      isAfterOpeningCurlyBrace: true,
+      completeOnEnter: false
+    ))
+  }
+
+  func testWithoutUndoRegistrationSkipsUndoEntries() {
+    let undoManager = UndoManager()
+    let target = UndoTarget()
+
+    CodeEditor.withoutUndoRegistration(using: undoManager) {
+      undoManager.registerUndo(withTarget: target) { target in
+        target.didUndo = true
+      }
+    }
+
+    XCTAssertFalse(undoManager.canUndo)
+
+    undoManager.registerUndo(withTarget: target) { target in
+      target.didUndo = true
+    }
+
+    XCTAssertTrue(undoManager.canUndo)
+  }
+
   func testShiftRightUsesConfiguredIndentationWidth() {
     let indentation = CodeEditor.IndentationConfiguration(preference: .preferSpaces,
                                                          tabWidth: 4,
@@ -61,4 +113,8 @@ final class CodeEditingBehaviorTests: XCTestCase {
                                                          indentOnReturn: true)
     XCTAssertEqual(indentation.defaultIndentation.utf16.count, 4)
   }
+}
+
+private final class UndoTarget {
+  var didUndo = false
 }

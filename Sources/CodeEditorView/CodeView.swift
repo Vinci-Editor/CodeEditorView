@@ -210,6 +210,18 @@ final class CodeView: UITextView {
   @Invalidating(.layout)
   var viewLayout: CodeEditor.LayoutConfiguration = .standard
 
+  /// Stable identity of the document currently displayed in this view.
+  ///
+  var documentID: String?
+
+  /// Per-document undo manager supplied by the SwiftUI wrapper.
+  ///
+  var documentUndoManager: UndoManager?
+
+  override var undoManager: UndoManager? {
+    documentUndoManager ?? super.undoManager
+  }
+
   /// The current indentation configuration.
   ///
   var indentation: CodeEditor.IndentationConfiguration = .standard
@@ -221,6 +233,10 @@ final class CodeView: UITextView {
   /// Xcode-like paired delimiter editing.
   ///
   var pairEditing: CodeEditor.PairEditingConfiguration = .xcode
+
+  /// Insertion points after a just-typed opening curly brace eligible for Return completion.
+  ///
+  var pendingOpeningCurlyBraceReturnCompletionLocations: Set<Int> = []
 
   /// Bracket matching behavior.
   ///
@@ -294,6 +310,8 @@ final class CodeView: UITextView {
   init(frame: CGRect,
        with language: LanguageConfiguration,
        viewLayout: CodeEditor.LayoutConfiguration,
+       documentID: String?,
+       undoManager: UndoManager?,
        indentation: CodeEditor.IndentationConfiguration,
        autoBrace: CodeEditor.AutoBraceConfiguration = .enabled,
        theme: Theme,
@@ -304,6 +322,8 @@ final class CodeView: UITextView {
     self.theme       = theme
     self.language    = language
     self.viewLayout  = viewLayout
+    self.documentID = documentID
+    self.documentUndoManager = undoManager
     self.indentation = indentation
     self.autoBrace   = autoBrace
     self.setMessages = setMessages
@@ -325,6 +345,7 @@ final class CodeView: UITextView {
     codeStorage.delegate = codeStorageDelegate
 
     super.init(frame: frame, textContainer: codeContainer)
+    codeStorageDelegate.undoManagerProvider = { [weak self] in self?.undoManager }
     codeContainer.textView = self
 
     // Add the view delegate early so it can be used by the safe renderingAttributesValidator wrapper.
@@ -502,6 +523,7 @@ final class CodeView: UITextView {
         guard let self else { return }
         // Notify background tokenizer of edit to pause during active typing
         self.backgroundTokenizer.notifyEdit()
+        self.scheduleSyntaxRedisplayAfterTextStorageChange()
 
         self.invalidateDocumentHeightCache()
         // NOTE: Removed computeDocumentHeightsAsync() - heights are set by performFullDocumentLayout()
@@ -949,6 +971,8 @@ final class CodeViewDelegate: NSObject, UITextViewDelegate {
   func textViewDidChangeSelection(_ textView: UITextView) {
     guard let codeView = textView as? CodeView else { return }
 
+    codeView.clearPendingOpeningCurlyBraceReturnCompletionIfSelectionMoved()
+
     // Close completion overlay when selection changes (user tapped or moved cursor)
     if codeView.isCompletionVisible {
       codeView.dismissCompletion()
@@ -1140,6 +1164,14 @@ final class CodeView: NSTextView {
   @Invalidating(.layout)
   var viewLayout: CodeEditor.LayoutConfiguration = .standard
 
+  /// Stable identity of the document currently displayed in this view.
+  ///
+  var documentID: String?
+
+  /// Per-document undo manager supplied by the SwiftUI wrapper.
+  ///
+  var documentUndoManager: UndoManager?
+
   /// The current indentation configuration.
   ///
   var indentation: CodeEditor.IndentationConfiguration = .standard
@@ -1151,6 +1183,10 @@ final class CodeView: NSTextView {
   /// Xcode-like paired delimiter editing.
   ///
   var pairEditing: CodeEditor.PairEditingConfiguration = .xcode
+
+  /// Insertion points after a just-typed opening curly brace eligible for Return completion.
+  ///
+  var pendingOpeningCurlyBraceReturnCompletionLocations: Set<Int> = []
 
   /// Bracket matching behavior.
   ///
@@ -1247,6 +1283,8 @@ final class CodeView: NSTextView {
   init(frame: CGRect,
        with language: LanguageConfiguration,
        viewLayout: CodeEditor.LayoutConfiguration,
+       documentID: String?,
+       undoManager: UndoManager?,
        indentation: CodeEditor.IndentationConfiguration,
        autoBrace: CodeEditor.AutoBraceConfiguration = .enabled,
        theme: Theme,
@@ -1257,6 +1295,8 @@ final class CodeView: NSTextView {
     self.theme       = theme
     self.language    = language
     self.viewLayout  = viewLayout
+    self.documentID = documentID
+    self.documentUndoManager = undoManager
     self.indentation = indentation
     self.autoBrace   = autoBrace
     self.setMessages = setMessages
@@ -1277,6 +1317,7 @@ final class CodeView: NSTextView {
     codeStorage.delegate = codeStorageDelegate
 
     super.init(frame: frame, textContainer: codeContainer)
+    codeStorageDelegate.undoManagerProvider = { [weak self] in self?.documentUndoManager }
 
     textLayoutManager.setSafeRenderingAttributesValidator(with: codeViewDelegate) { [weak self] (textLayoutManager, layoutFragment) in
       guard let self else { return }
@@ -1480,6 +1521,7 @@ final class CodeView: NSTextView {
         guard let self else { return }
         // Notify background tokenizer of edit to pause during active typing
         self.backgroundTokenizer.notifyEdit()
+        self.scheduleSyntaxRedisplayAfterTextStorageChange()
 
 //        self?.infoPopover?.close()
         self.invalidateDocumentHeightCache()
@@ -2014,12 +2056,19 @@ final class CodeViewDelegate: NSObject, NSTextViewDelegate {
     codeView.codeStorageDelegate.flushPendingSetText()
   }
 
+  func undoManager(for textView: NSTextView) -> UndoManager? {
+    (textView as? CodeView)?.documentUndoManager
+  }
+
   func textViewDidChangeSelection(_ notification: Notification) {
     guard let textView = notification.object as? NSTextView else { return }
+    let codeView = textView as? CodeView
 
     // Close completion panel when selection changes (user clicked or moved cursor)
     // This is only called for selection changes NOT triggered by text insertion
-    if let codeView = textView as? CodeView, codeView.completionPanel.isVisible {
+    codeView?.clearPendingOpeningCurlyBraceReturnCompletionIfSelectionMoved()
+
+    if let codeView = codeView, codeView.completionPanel.isVisible {
       if codeView.completionTask != nil {
         codeView.completionTask?.cancel()
         codeView.completionTask = nil
@@ -2064,6 +2113,69 @@ final class CodeBackgroundHighlightView: NSBox {
 // MARK: Shared code
 
 extension CodeView {
+
+  func consumeTextForDocumentSwitch() -> String {
+    codeStorageDelegate.consumePendingSetTextValue() ?? text ?? ""
+  }
+
+  func discardPendingTextPropagation() {
+    codeStorageDelegate.cancelPendingSetText()
+  }
+
+  func scheduleSyntaxRedisplayAfterTextStorageChange() {
+    let invalidationRange = codeStorageDelegate.tokenInvalidationRange
+    let invalidationLines = codeStorageDelegate.tokenInvalidationLines ?? 0
+    let shouldRedisplayVisibleSyntaxRange = codeStorageDelegate.redisplayVisibleSyntaxRange
+
+    DispatchQueue.main.async { [weak self] in
+      self?.redisplaySyntaxForCurrentInvalidation(range: invalidationRange,
+                                                  lines: invalidationLines,
+                                                  shouldRedisplayVisibleSyntaxRange: shouldRedisplayVisibleSyntaxRange)
+    }
+  }
+
+  private func redisplaySyntaxForCurrentInvalidation(range invalidationRange: NSRange?,
+                                                     lines invalidationLines: Int,
+                                                     shouldRedisplayVisibleSyntaxRange: Bool) {
+    guard let textLayoutManager = optTextLayoutManager,
+          let textContentStorage = optTextContentStorage
+    else { return }
+
+    if let invalidationRange,
+       invalidationRange.length > 0,
+       invalidationLines > 0,
+       let textRange = clampedTextRange(for: invalidationRange, in: textContentStorage)
+    {
+      textLayoutManager.redisplayRenderingAttributes(for: textRange)
+      minimapView?.textLayoutManager?.redisplayRenderingAttributes(for: textRange)
+    }
+
+    if shouldRedisplayVisibleSyntaxRange,
+       let visibleTextRange = textLayoutManager.textViewportLayoutController.viewportRange
+    {
+      textLayoutManager.redisplayRenderingAttributes(for: visibleTextRange)
+      minimapView?.textLayoutManager?.redisplayRenderingAttributes(for: visibleTextRange)
+    }
+
+#if os(iOS) || os(visionOS)
+    setNeedsDisplay()
+    minimapView?.setNeedsDisplay()
+#elseif os(macOS)
+    needsDisplay = true
+    minimapView?.needsDisplay = true
+#endif
+  }
+
+  private func clampedTextRange(for range: NSRange, in textContentStorage: NSTextContentStorage) -> NSTextRange? {
+    guard let codeStorage = optCodeStorage else { return nil }
+
+    let documentLength = codeStorage.length
+    let location = max(0, min(range.location, documentLength))
+    let maxLocation = max(location, min(range.max, documentLength))
+    guard maxLocation > location else { return nil }
+
+    return textContentStorage.textRange(for: NSRange(location: location, length: maxLocation - location))
+  }
 
   // MARK: Background highlights
   

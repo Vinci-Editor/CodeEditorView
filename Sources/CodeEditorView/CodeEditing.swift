@@ -86,6 +86,16 @@ enum CodeEditingContext {
     return ReturnEditResult(replacementText: "\n" + innerIndentString + "\n" + baseIndentString + closingText,
                             selectionOffset: 1 + innerIndentString.utf16.count)
   }
+
+  static func shouldCompleteCurlyBraceOnReturn(at location: Int,
+                                               pendingOpeningCurlyBraceLocations: Set<Int>,
+                                               isAfterOpeningCurlyBrace: Bool,
+                                               completeOnEnter: Bool)
+  -> Bool {
+    completeOnEnter
+      && pendingOpeningCurlyBraceLocations.contains(location)
+      && isAfterOpeningCurlyBrace
+  }
 }
 
 
@@ -163,6 +173,15 @@ public struct CodeEditingCommandsView: View {
   public var body: some View {
 
     Button {
+      send(#selector(CodeEditorActions.complete(_:)))
+    } label: {
+      Label("Complete", systemImage: "text.badge.plus")
+    }
+    .keyboardShortcut(" ", modifiers: [.control])
+
+    Divider()
+
+    Button {
       send(#selector(CodeEditorActions.reindent(_:)))
     } label: {
       Label("Re-Indent", systemImage: "text.alignleft")
@@ -203,6 +222,7 @@ public struct CodeEditingCommandsView: View {
   func shiftLeft(_ sender: Any?)
   func shiftRight(_ sender: Any?)
   func commentSelection(_ sender: Any?)
+  func complete(_ sender: Any?)
 }
 
 extension CodeView: @preconcurrency CodeEditorActions {
@@ -216,6 +236,11 @@ extension CodeView: @preconcurrency CodeEditorActions {
   @objc public func shiftLeft(_ sender: Any?) { shiftLeftOrRight(doShiftLeft: true) }
   @objc public func shiftRight(_ sender: Any?) { shiftLeftOrRight(doShiftLeft: false) }
   @objc public func commentSelection(_ sender: Any?) { comment() }
+#if os(macOS)
+  @objc public override func complete(_ sender: Any?) { completionAction() }
+#else
+  @objc public func complete(_ sender: Any?) { completionAction() }
+#endif
 }
 
 // MARK: -
@@ -227,24 +252,32 @@ extension CodeView {
 
   override public func insertText(_ insertString: Any, replacementRange: NSRange) {
     let string = (insertString as? NSAttributedString)?.string ?? insertString as? String
+    let isPlainTextInsertion = replacementRange.location == NSNotFound
+    if string != "{" || !isPlainTextInsertion {
+      clearPendingOpeningCurlyBraceReturnCompletion()
+    }
+
     if let string,
-       replacementRange.location == NSNotFound,
+       isPlainTextInsertion,
        performPairTextInsertion(string)
     {
       return
     }
 
     super.insertText(insertString, replacementRange: replacementRange)
+    if string == "{" && isPlainTextInsertion { rememberOpeningCurlyBraceForReturnCompletion() }
     if let string { triggerCompletionIfNeeded(afterInserting: string) }
     if string == "}" { reindentAfterTypingClosingBrace() }
   }
 
   override public func deleteBackward(_ sender: Any?) {
+    clearPendingOpeningCurlyBraceReturnCompletion()
     if performPairedDeletion(backward: true) { return }
     super.deleteBackward(sender)
   }
 
   override public func deleteForward(_ sender: Any?) {
+    clearPendingOpeningCurlyBraceReturnCompletion()
     if performPairedDeletion(backward: false) { return }
     super.deleteForward(sender)
   }
@@ -253,6 +286,7 @@ extension CodeView {
 
     // Forward relevant events to completion panel if visible
     if completionPanel.isVisible && completionPanel.handleKeyEvent(event) {
+      clearPendingOpeningCurlyBraceReturnCompletion()
       return
     }
 
@@ -262,6 +296,7 @@ extension CodeView {
     } else if event.keyCode == keyCodeReturn && noModifiers {
       insertReturn()
     } else {
+      clearPendingOpeningCurlyBraceReturnCompletion()
       super.keyDown(with: event)
     }
   }
@@ -269,19 +304,23 @@ extension CodeView {
 #elseif os(iOS) || os(visionOS)
 
   override public func insertText(_ text: String) {
+    if text != "{" { clearPendingOpeningCurlyBraceReturnCompletion() }
+
     if performPairTextInsertion(text) { return }
     super.insertText(text)
+    if text == "{" { rememberOpeningCurlyBraceForReturnCompletion() }
     triggerCompletionIfNeeded(afterInserting: text)
     if text == "}" { reindentAfterTypingClosingBrace() }
   }
 
   override public func deleteBackward() {
+    clearPendingOpeningCurlyBraceReturnCompletion()
     if performPairedDeletion(backward: true) { return }
     super.deleteBackward()
   }
 
   override var keyCommands: [UIKeyCommand]? {
-    var commands: [UIKeyCommand] = []
+    var commands = super.keyCommands ?? []
 
     // Completion navigation commands (when completion is visible)
     if isCompletionVisible {
@@ -299,8 +338,19 @@ extension CodeView {
       commands.append(UIKeyCommand(input: "\r", modifierFlags: [], action: #selector(insertReturnCommand)))
     }
 
+    commands.append(UIKeyCommand(input: "f", modifierFlags: .command, action: #selector(UIResponderStandardEditActions.find(_:)),
+                                 discoverabilityTitle: "Find"))
+    commands.append(UIKeyCommand(input: "f", modifierFlags: [.command, .alternate], action: #selector(UIResponderStandardEditActions.findAndReplace(_:)),
+                                 discoverabilityTitle: "Find and Replace"))
+    commands.append(UIKeyCommand(input: "g", modifierFlags: .command, action: #selector(UIResponderStandardEditActions.findNext(_:)),
+                                 discoverabilityTitle: "Find Next"))
+    commands.append(UIKeyCommand(input: "G", modifierFlags: [.command, .shift], action: #selector(UIResponderStandardEditActions.findPrevious(_:)),
+                                 discoverabilityTitle: "Find Previous"))
+    commands.append(UIKeyCommand(input: "e", modifierFlags: .command, action: #selector(UIResponderStandardEditActions.useSelectionForFind(_:)),
+                                 discoverabilityTitle: "Use Selection for Find"))
+
     // Ctrl+Space to trigger completion (always available)
-    commands.append(UIKeyCommand(input: " ", modifierFlags: .control, action: #selector(triggerCompletion),
+    commands.append(UIKeyCommand(input: " ", modifierFlags: .control, action: #selector(complete(_:)),
                                  discoverabilityTitle: "Complete"))
     commands.append(UIKeyCommand(input: "D", modifierFlags: .command, action: #selector(duplicate(_:)),
                                  discoverabilityTitle: "Duplicate"))
@@ -326,6 +376,33 @@ extension CodeView {
 }
 
 extension CodeView {
+
+  private var currentInsertionLocations: Set<Int> {
+#if os(macOS)
+    Set(selectedRanges.compactMap { value in
+      let range = value.rangeValue
+      return range.length == 0 ? range.location : nil
+    })
+#elseif os(iOS) || os(visionOS)
+    selectedRange.length == 0 ? Set([selectedRange.location]) : Set<Int>()
+#endif
+  }
+
+  func clearPendingOpeningCurlyBraceReturnCompletion() {
+    pendingOpeningCurlyBraceReturnCompletionLocations.removeAll()
+  }
+
+  func clearPendingOpeningCurlyBraceReturnCompletionIfSelectionMoved() {
+    guard !pendingOpeningCurlyBraceReturnCompletionLocations.isEmpty,
+          currentInsertionLocations != pendingOpeningCurlyBraceReturnCompletionLocations
+    else { return }
+
+    clearPendingOpeningCurlyBraceReturnCompletion()
+  }
+
+  private func rememberOpeningCurlyBraceForReturnCompletion() {
+    pendingOpeningCurlyBraceReturnCompletionLocations = currentInsertionLocations
+  }
 
   private func performPairTextInsertion(_ text: String) -> Bool {
     guard text.utf16.count == 1,
@@ -1080,6 +1157,7 @@ extension CodeView {
   /// * If the selection spans multiple lines, the lines are always indented.
   ///
   @objc func insertTab() {
+    clearPendingOpeningCurlyBraceReturnCompletion()
 
     guard let textContentStorage  = optTextContentStorage,
           let codeStorage         = optCodeStorage,
@@ -1145,6 +1223,8 @@ extension CodeView {
   }
 
   func insertReturn () {
+    let pendingOpeningCurlyBraceLocations = pendingOpeningCurlyBraceReturnCompletionLocations
+    clearPendingOpeningCurlyBraceReturnCompletion()
 
     guard let textContentStorage  = optTextContentStorage,
           let codeStorage         = optCodeStorage,
@@ -1241,8 +1321,14 @@ extension CodeView {
 
         let desiredIndent = if indentation.indentOnReturn { predictedIndentation(after: range.location) } else { 0 },
             indentString  = indentation.indentation(for: desiredIndent)
+        let isPendingOpeningCurlyBrace = pendingOpeningCurlyBraceLocations.contains(range.location)
 
-        if autoBrace.completeOnEnter && isAfterOpeningCurlyBrace(at: range.location) {
+        if CodeEditingContext.shouldCompleteCurlyBraceOnReturn(
+          at: range.location,
+          pendingOpeningCurlyBraceLocations: pendingOpeningCurlyBraceLocations,
+          isAfterOpeningCurlyBrace: isPendingOpeningCurlyBrace && isAfterOpeningCurlyBrace(at: range.location),
+          completeOnEnter: autoBrace.completeOnEnter
+        ) {
           let edit = CodeEditingContext.returnInsideCurlyBrace(
             baseIndent: baseIndentation(at: range.location),
             indentation: indentation,

@@ -255,8 +255,8 @@ extension NSTextLayoutManager {
 
 extension NSTextLayoutManager {
 
-  private final class PendingTextLayoutFragments {
-    var fragments: [NSTextLayoutFragment] = []
+  private final class PostEditRenderingInvalidation {
+    var needed = false
   }
 
   /// Set the rendering attribute validator in a way that it avoids the timing bug with updating internal layout
@@ -279,41 +279,45 @@ extension NSTextLayoutManager {
 
     }
 
-    let pendingFragments = PendingTextLayoutFragments()
+    let postEditInvalidation = PostEditRenderingInvalidation()
 
     self.renderingAttributesValidator = { textLayoutManager, textLayoutFragment in
       // CRITICAL: Only defer during active editing transactions to work around macOS 14 bug.
       // During scrolling (when NOT in an editing transaction), apply attributes IMMEDIATELY.
       // This is essential for scroll highlighting to work.
       if textContentManager.hasEditingTransaction {
-        // Defer to avoid the macOS 14 timing bug during edits
-        pendingFragments.fragments.append(textLayoutFragment)
+        // Do not retain and replay layout fragments produced during the edit transaction. Their text ranges can be
+        // pre-edit ranges; replaying them after undo/redo paints syntax attributes at shifted positions.
+        postEditInvalidation.needed = true
       } else {
         // Apply immediately - this is the normal case (scrolling, initial load, etc.)
         renderingAttributesValidator(textLayoutManager, textLayoutFragment)
       }
     }
 
-    func processFragements() {
-      let fragments = pendingFragments.fragments
-      pendingFragments.fragments = []
-      fragments.forEach {
-        renderingAttributesValidator(self, $0) }
+    func invalidateAfterEditing() {
+      guard postEditInvalidation.needed else { return }
+      postEditInvalidation.needed = false
+
+      if let viewportRange = self.textViewportLayoutController.viewportRange {
+        self.redisplayRenderingAttributes(for: viewportRange)
+      }
     }
 
-    // After a text change is reported to the view's delegate, always process all pending fragments.
+    // After a text change is reported to the view's delegate, invalidate the current viewport so TextKit revalidates
+    // against post-edit ranges.
     let currentTextDidChange = codeViewDelegate.textDidChange
     codeViewDelegate.textDidChange = { textView in
       currentTextDidChange?(textView)
-      processFragements()
+      invalidateAfterEditing()
     }
 
     return textContentManager.observe(\.hasEditingTransaction) {
-      [processFragements] textContentManager, change in
+      [invalidateAfterEditing] textContentManager, change in
 
-      // Process fragments if an editing transaction just ended.
+      // Invalidate the viewport if an editing transaction just ended.
       guard !textContentManager.hasEditingTransaction else { return }
-      processFragements()
+      invalidateAfterEditing()
 
     }
   }

@@ -242,16 +242,18 @@ final class BackgroundTokenizer {
 
     for line in lines {
       guard line < delegate.lineMap.lines.count else { continue }
+      guard !delegate.isLineTokenized(line) else { continue }
 
-      let lineEntry = delegate.lineMap.lines[line]
+      let dependencyLines = delegate.tokenizationRangeForRendering(lines: line..<(line + 1)) ?? line..<(line + 1)
+      let startLine = dependencyLines.lowerBound
+      guard startLine < delegate.lineMap.lines.count else { continue }
+
+      let lineEntry = delegate.lineMap.lines[startLine]
       let charRange = lineEntry.range
 
-      // Perform tokenization for this line with limited trailing to prevent blocking
+      // Perform tokenization from the first invalidated dependency with limited trailing to prevent blocking.
       // The background tokenizer will handle remaining lines in subsequent batches
       let (highlightingRange, _) = delegate.tokenise(range: charRange, in: storage, maxTrailingLines: 20)
-
-      // Mark line as tokenized
-      delegate.setTokenizationState(.tokenized, for: line..<(line + 1))
 
       // Expand affected range
       if let existing = affectedRange {

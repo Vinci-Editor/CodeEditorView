@@ -175,6 +175,39 @@ extension CodeStorage {
             let delegate = self.delegate as? CodeStorageDelegate
       else { return }
 
+      func rangesToInvalidate(from affectedRange: NSRange, excluding renderedRange: NSRange) -> [NSRange] {
+        var ranges: [NSRange] = []
+
+        if affectedRange.location < renderedRange.location {
+          let beforeEnd = min(affectedRange.max, renderedRange.location)
+          if beforeEnd > affectedRange.location {
+            ranges.append(NSRange(location: affectedRange.location, length: beforeEnd - affectedRange.location))
+          }
+        }
+
+        if affectedRange.max > renderedRange.max {
+          let afterStart = max(affectedRange.location, renderedRange.max)
+          if affectedRange.max > afterStart {
+            ranges.append(NSRange(location: afterStart, length: affectedRange.max - afterStart))
+          }
+        }
+
+        return ranges
+      }
+
+      func invalidateRetokenizedRangesOutsideRenderedRange(_ affectedRange: NSRange, viewport: NSRange?) {
+        let invalidationRange = viewport.flatMap { affectedRange.intersection($0) } ?? affectedRange
+        guard invalidationRange.length > 0 else { return }
+
+        for extraRange in rangesToInvalidate(from: invalidationRange, excluding: range) {
+          guard extraRange.length > 0,
+                let textRange = contentStorage.textRange(for: extraRange)
+          else { continue }
+
+          layoutManager.invalidateRenderingAttributes(for: textRange)
+        }
+      }
+
       // Set default text color first
       if let textRange = contentStorage.textRange(for: range) {
         layoutManager.setRenderingAttributes([.foregroundColor: theme.textColour, .hideInvisibles: ()],
@@ -197,31 +230,17 @@ extension CodeStorage {
       }
       if usedTreeSitter { return }
 
-      // On-demand tokenization: Sync-tokenize only the first few visible lines for instant highlighting.
-      // This ensures the first render has highlighting without blocking on the entire viewport.
-      // PERFORMANCE: Limit to 5 lines max - background tokenizer handles the rest asynchronously.
+      // On-demand tokenization: every line in the range being rendered must have current token data before painting.
+      // Background tokenization remains useful for offscreen work, but visible text must not render stale line info.
       let lines = delegate.lineMap.linesContaining(range: range)
-      var syncTokenizedCount = 0
-      let maxSyncLines = 5  // Only sync-tokenize first 5 lines to prevent blocking
-
-      // Pass 1: Ensure visible lines are tokenized (sync tokenize first few)
-      for line in lines where line < delegate.lineMap.lines.count {
-        let lineInfo = delegate.lineMap.lines[line].info
-
-        // If line needs tokenization and we haven't hit our sync limit
-        if (lineInfo == nil || lineInfo?.tokenizationState != .tokenized) && syncTokenizedCount < maxSyncLines {
-          if let lineRange = delegate.lineMap.lookup(line: line)?.range {
-            // Use maxTrailingLines: 1 to minimize cascading tokenization
-            let _ = delegate.tokenise(range: lineRange, in: self, maxTrailingLines: 1)
-            delegate.setTokenizationState(.tokenized, for: line..<(line + 1))
-            syncTokenizedCount += 1
-            CodeEditorInstrumentation.record(.syncTokenizedLines)
-          }
-        }
-        // Lines beyond maxSyncLines will be handled by background tokenizer
+      if let tokenizationLines = delegate.tokenizationRangeForRendering(lines: lines) {
+        let tokenizationRange = delegate.lineMap.charRangeOf(lines: tokenizationLines)
+        let tokenizationResult = delegate.tokenise(range: tokenizationRange, in: self)
+        invalidateRetokenizedRangesOutsideRenderedRange(tokenizationResult.affectedRange, viewport: viewportCharRange)
+        CodeEditorInstrumentation.record(.syncTokenizedLines)
       }
 
-      // Pass 2: Enumerate ALL tokens in range (including just-tokenized ones)
+      // Pass 2: Enumerate ALL tokens in range.
       enumerateTokens(in: range) { lineToken in
 
         if let documentRange = lineToken.range.intersection(range),
@@ -427,7 +446,7 @@ extension CodeStorage {
     else { return }
 
     let firstLine = lineMap.lines[startLine]
-    if let info = firstLine.info {
+    if let info = firstLine.info, info.tokenizationState == .tokenized {
 
       let doContinue = enumerate(tokens: info.tokens,
                                  commentRanges: info.commentRanges,
@@ -439,7 +458,7 @@ extension CodeStorage {
 
     for line in lineMap.lines[startLine + 1 ..< lineMap.lines.count] {
 
-      if let info = line.info {
+      if let info = line.info, info.tokenizationState == .tokenized {
 
         let doContinue = enumerate(tokens: info.tokens,
                                    commentRanges: info.commentRanges,
@@ -514,7 +533,7 @@ extension CodeStorage {
     for lineIndex in startLine...endLine {
       guard lineIndex < lineMap.lines.count else { break }
       let line = lineMap.lines[lineIndex]
-      if let info = line.info {
+      if let info = line.info, info.tokenizationState == .tokenized {
         let skipBefore: Int? = (lineIndex == startLine) ? (range.location - line.range.location) : nil
         enumerate(tokens: info.tokens,
                   commentRanges: info.commentRanges,
@@ -619,24 +638,7 @@ class CodeContentStorage: NSTextContentStorage {
     // point!)
     guard editMask.contains(.editedCharacters) else { return }
 
-    // NB: We need to wait until after the content storage has processed the edit before text locations (and ranges)
-    //     match characters counts in the backing store again. Hence, the placement after the super call.
-    if let codeStorageDelegate   = textStorage.delegate as? CodeStorageDelegate,
-       let invalidationRange     = codeStorageDelegate.tokenInvalidationRange,
-       let invalidationLines     = codeStorageDelegate.tokenInvalidationLines
-    {
-      let additionalInvalidationRange = if invalidatedCharRange.location == invalidationRange.location {
-          NSRange(location: invalidatedCharRange.max, length: invalidationRange.length - invalidatedCharRange.length)
-        } else { invalidationRange }
-
-      if additionalInvalidationRange.length > 0 && invalidationLines > 1,
-        let additionalInvalidationTextRange = textRange(for: additionalInvalidationRange)
-      {
-        for textLayoutManager in textLayoutManagers {
-          
-          textLayoutManager.redisplayRenderingAttributes(for: additionalInvalidationTextRange)
-        }
-      }
-    }
+    // Syntax rendering is refreshed from the owning text view's text-changed notification. Doing it here is still
+    // inside TextKit's edit pipeline and can apply attributes against transient pre-edit layout ranges.
   }
 }

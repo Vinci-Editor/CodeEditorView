@@ -8,6 +8,11 @@ import UIKit
 
 extension CodeView {
 
+  override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+    clearPendingOpeningCurlyBraceReturnCompletion()
+    super.touchesBegan(touches, with: event)
+  }
+
   @objc func handleEditorHover(_ recognizer: UIHoverGestureRecognizer) {
     guard recognizer.state == .ended || recognizer.state == .cancelled else { return }
     if isCompletionVisible {

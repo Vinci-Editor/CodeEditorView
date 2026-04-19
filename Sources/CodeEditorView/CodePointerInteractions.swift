@@ -59,6 +59,8 @@ extension CodeView {
   }
 
   override func mouseDown(with event: NSEvent) {
+    clearPendingOpeningCurlyBraceReturnCompletion()
+
     if event.modifierFlags.contains(.command),
        let range = commandHoverRange
     {

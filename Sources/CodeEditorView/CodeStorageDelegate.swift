@@ -221,6 +221,10 @@ class CodeStorageDelegate: NSObject, NSTextStorageDelegate, @unchecked Sendable 
   ///
   private(set) var tokenInvalidationLines: Int? = nil
 
+  /// Whether visible syntax rendering should be refreshed after a full parser update.
+  ///
+  private(set) var redisplayVisibleSyntaxRange = false
+
   /// Indicates the number of characters added by token completion to the right of the insertion point by the
   /// `CodeStorageDelegate`, so that the `CodeViewDelegate` can restrict the advance of the insertion point. This is
   /// only necessary on macOS and seems like a kludge.
@@ -235,6 +239,10 @@ class CodeStorageDelegate: NSObject, NSTextStorageDelegate, @unchecked Sendable 
   /// Monotonic UTF-16 document version used to drop stale async results.
   ///
   private(set) var documentVersion: Int = 0
+
+  /// Active undo manager, supplied by the text view, used to identify native TextKit undo and redo replay.
+  ///
+  var undoManagerProvider: (() -> UndoManager?)?
 
   /// Debounce interval for setText calls. Higher values reduce string copy frequency but delay binding sync.
   /// 300ms is imperceptible to users while significantly reducing work during rapid typing.
@@ -281,6 +289,15 @@ class CodeStorageDelegate: NSObject, NSTextStorageDelegate, @unchecked Sendable 
     setText(pendingSetTextValue)
   }
 
+  func consumePendingSetTextValue() -> String? {
+    guard let pendingSetTextValue else { return nil }
+    pendingSetTextWorkItem?.cancel()
+    pendingSetTextWorkItem = nil
+    self.pendingSetTextValue = nil
+    CodeEditorInstrumentation.record(.setTextFlushed)
+    return pendingSetTextValue
+  }
+
   func cancelPendingSetText() {
     pendingSetTextWorkItem?.cancel()
     pendingSetTextWorkItem = nil
@@ -294,15 +311,25 @@ class CodeStorageDelegate: NSObject, NSTextStorageDelegate, @unchecked Sendable 
   ///
   func setTokenizationState(_ state: LineInfo.TokenizationState, for line: Int) {
     guard line < lineMap.lines.count else { return }
-    lineMap.lines[line].info?.tokenizationState = state
+    updateTokenizationState(state, for: line)
   }
 
   /// Update the tokenization state for a range of lines.
   ///
   func setTokenizationState(_ state: LineInfo.TokenizationState, for lines: Range<Int>) {
     for line in lines where line < lineMap.lines.count {
-      lineMap.lines[line].info?.tokenizationState = state
+      updateTokenizationState(state, for: line)
     }
+  }
+
+  private func updateTokenizationState(_ state: LineInfo.TokenizationState, for line: Int) {
+    guard var info = lineMap.lines[line].info else { return }
+    info.tokenizationState = state
+    if state != .tokenized {
+      info.tokens = []
+      info.commentRanges = []
+    }
+    lineMap.setInfoOf(line: line, to: info)
   }
 
   /// Check if a line is tokenized.
@@ -310,6 +337,22 @@ class CodeStorageDelegate: NSObject, NSTextStorageDelegate, @unchecked Sendable 
   func isLineTokenized(_ line: Int) -> Bool {
     guard line < lineMap.lines.count else { return false }
     return lineMap.lines[line].info?.tokenizationState == .tokenized
+  }
+
+  /// Lines that must be tokenized before rendering the supplied visible line range.
+  ///
+  /// The range can extend backwards if previous lines are also untokenized, as tokenization state depends on preceding
+  /// comment depth.
+  func tokenizationRangeForRendering(lines: Range<Int>) -> Range<Int>? {
+    let clippedLines = lines.clamped(to: 0..<lineMap.lines.count)
+    guard !clippedLines.isEmpty else { return nil }
+    guard clippedLines.contains(where: { !isLineTokenized($0) }) else { return nil }
+
+    var startLine = clippedLines.lowerBound
+    while startLine > 0 && !isLineTokenized(startLine - 1) {
+      startLine -= 1
+    }
+    return startLine..<clippedLines.upperBound
   }
 
   /// Check if all lines in a range are tokenized.
@@ -481,6 +524,7 @@ class CodeStorageDelegate: NSObject, NSTextStorageDelegate, @unchecked Sendable 
 
     tokenInvalidationRange = nil
     tokenInvalidationLines = nil
+    redisplayVisibleSyntaxRange = false
     guard let codeStorage = textStorage as? CodeStorage else { return }
 
     // If only attributes change, the line map and syntax highlighting remains the same => nothing for us to do
@@ -488,19 +532,27 @@ class CodeStorageDelegate: NSObject, NSTextStorageDelegate, @unchecked Sendable 
 
     // Cache the text storage string once to avoid multiple expensive copies during this edit pass
     let cachedString = textStorage.string
+    let isWholeDocumentReplacement = editedRange == NSRange(location: 0, length: textStorage.length)
+    let editChangesLength = delta != 0
 
     // Tree-sitter highlight caches are invalid after any character edit.
     treeSitterHighlightCaches.removeAll()
     documentVersion += 1
+    redisplayVisibleSyntaxRange = editChangesLength && !isWholeDocumentReplacement
 
     // Keep tree-sitter parse tree in sync with the text storage.
-    // This is incremental for small edits and falls back to a full parse for large replacements.
+    // Native undo/redo can replay grouped TextKit edits whose ranges are correct for TextKit but brittle for
+    // tree-sitter incremental parsing, so force a full parse for those edits. We also use a full parse for deletions,
+    // replacements, and pastes; normal single-character typing keeps the fast incremental path.
     if let treeSitterTokenizer {
-      let isLargeEdit = editedRange.length > 4096 || abs(delta) > 4096
-      if isLargeEdit {
-        treeSitterTokenizer.ensureParsed(cachedString)
-      } else {
+      let isSingleCharacterInsertion = editedRange.length == 0 && delta == 1
+      let undoManager = undoManagerProvider?()
+      let isUndoingOrRedoing = undoManager?.isUndoing == true || undoManager?.isRedoing == true
+      if isSingleCharacterInsertion && !isUndoingOrRedoing {
         treeSitterTokenizer.applyEdit(newText: cachedString, editedRange: editedRange, delta: delta)
+      } else {
+        treeSitterTokenizer.ensureParsed(cachedString)
+        redisplayVisibleSyntaxRange = redisplayVisibleSyntaxRange || !isWholeDocumentReplacement
       }
     }
 
@@ -513,16 +565,16 @@ class CodeStorageDelegate: NSObject, NSTextStorageDelegate, @unchecked Sendable 
     }
 
     // Determine the ids of message bundles that are invalidated by this edit.
-    let lines = lineMap.linesAffected(by: editedRange, changeInLength: delta)
-    lastInvalidatedMessageIDs = lines.compactMap { line in
-      if line == lines.first {
+    let oldAffectedLines = lineMap.linesAffected(by: editedRange, changeInLength: delta)
+    lastInvalidatedMessageIDs = oldAffectedLines.compactMap { line in
+      if line == oldAffectedLines.first {
         if messageAffectedByEditFor(line: line) { lineMap.lookup(line: line)?.info?.messages?.id } else { nil }
       } else {
         lineMap.lookup(line: line)?.info?.messages?.id
       }
     }
 
-    lineMap.updateAfterEditing(string: cachedString, range: editedRange, changeInLength: delta)
+    let editResult = lineMap.updateAfterEditing(string: cachedString, range: editedRange, changeInLength: delta)
 
     // PERFORMANCE FIX: Defer tokenization to background for most edits.
     // Synchronous tokenization on the main thread was killing typing performance.
@@ -533,10 +585,10 @@ class CodeStorageDelegate: NSObject, NSTextStorageDelegate, @unchecked Sendable 
     //
     // We only do synchronous tokenization for token completion (auto-close brackets)
     // which needs immediate token context.
-    let isInitialLoad = editedRange == NSRange(location: 0, length: textStorage.length)
+    let isInitialLoad = isWholeDocumentReplacement
     let lineCount = lineMap.lines.count
     let isLargeDocument = editedRange.length > 10000 || lineCount > 100
-    let affectedLines = lineMap.linesAffected(by: editedRange, changeInLength: delta)
+    let invalidationLines = editResult.newLineRange.clamped(to: 0..<lineCount)
 
     var highlightingRange: NSRange
     var highlightingLines: Int
@@ -546,14 +598,16 @@ class CodeStorageDelegate: NSObject, NSTextStorageDelegate, @unchecked Sendable 
     if isInitialLoad && isLargeDocument {
       // Large initial load - mark ALL lines as pending
       setTokenizationState(.pending, for: 0..<lineCount)
+      highlightingRange = .zero
+      highlightingLines = 0
     } else {
       // Regular edit - mark affected lines as invalidated
-      setTokenizationState(.invalidated, for: affectedLines)
+      setTokenizationState(.invalidated, for: invalidationLines)
+      highlightingRange = lineMap.charRangeOf(lines: invalidationLines)
+      highlightingLines = invalidationLines.count
     }
-    highlightingRange = editedRange
-    highlightingLines = 0
 
-    processingStringReplacement = editedRange == NSRange(location: 0, length: textStorage.length)
+    processingStringReplacement = isWholeDocumentReplacement
 
     // If a single character was added, process token-level completion steps (and remember that we are processing a
     // one character addition).
@@ -921,7 +975,10 @@ extension CodeStorageDelegate {
     trailingLineLoop: while currentLine < lineMap.lines.count {
 
       // Check if we've hit the trailing line limit
-      if let limit = maxTrailingLines, trailingLinesProcessed >= limit { break trailingLineLoop }
+      if let limit = maxTrailingLines, trailingLinesProcessed >= limit {
+        setTokenizationState(.invalidated, for: currentLine..<lineMap.lines.count)
+        break trailingLineLoop
+      }
 
       if let lineEntry      = lineMap.lookup(line: currentLine),
          let lineEntryRange = Range<String.Index>(lineEntry.range, in: textStorage.string)

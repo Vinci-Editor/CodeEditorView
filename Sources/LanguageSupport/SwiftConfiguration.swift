@@ -87,6 +87,6 @@ extension LanguageConfiguration {
                                  treeSitterLanguage: { Language(language: tree_sitter_swift()) },
                                  treeSitterHighlightQuery: SwiftTreeSitterQueries.swiftHighlights,
                                  treeSitterCaptureMapping: TreeSitterCaptureMappings.swift,
-                                 preferTreeSitter: true)
+                                 preferTreeSitter: false)
   }
 }

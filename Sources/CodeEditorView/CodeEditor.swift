@@ -6,6 +6,7 @@
 //  SwiftUI 'CodeEditor' view
 
 import Combine
+import Foundation
 import SwiftUI
 
 import Rearrange
@@ -55,6 +56,9 @@ public struct CodeEditor {
   let breakUndoCoalescing: PassthroughSubject<(), Never>?
   let setActionsParam:     SetActions?
   let setInfoParam:        SetInfo?
+  let documentID:          String?
+  let undoManager:         UndoManager?
+  let documentTextWillFlush: (@MainActor (String, String) -> Void)?
 
   @Binding private var text:     String
   @Binding private var position: Position
@@ -100,7 +104,10 @@ public struct CodeEditor {
               layout:              LayoutConfiguration = .standard,
               breakUndoCoalescing: PassthroughSubject<(), Never>? = nil,
               setActions:          ((Actions) -> Void)? = nil,
-              setInfo:             ((Info) -> Void)? = nil)
+              setInfo:             ((Info) -> Void)? = nil,
+              documentID:          String? = nil,
+              undoManager:         UndoManager? = nil,
+              documentTextWillFlush: (@MainActor (String, String) -> Void)? = nil)
   {
     self._text               = text
     self._position           = position
@@ -110,6 +117,9 @@ public struct CodeEditor {
     self.breakUndoCoalescing = breakUndoCoalescing
     self.setActionsParam     = setActions.flatMap{ SetActions($0) }
     self.setInfoParam        = setInfo.flatMap{ SetInfo($0) }
+    self.documentID          = documentID
+    self.undoManager         = undoManager
+    self.documentTextWillFlush = documentTextWillFlush
   }
 
   /// Creates a fully configured code editor.
@@ -128,7 +138,10 @@ public struct CodeEditor {
               position:            Binding<Position>,
               messages:            Binding<Set<TextLocated<Message>>>,
               language:            LanguageConfiguration = .none,
-              breakUndoCoalescing: PassthroughSubject<(), Never>? = nil)
+              breakUndoCoalescing: PassthroughSubject<(), Never>? = nil,
+              documentID:          String? = nil,
+              undoManager:         UndoManager? = nil,
+              documentTextWillFlush: (@MainActor (String, String) -> Void)? = nil)
   {
     self._text               = text
     self._position           = position
@@ -138,6 +151,9 @@ public struct CodeEditor {
     self.breakUndoCoalescing = breakUndoCoalescing
     self.setActionsParam     = nil
     self.setInfoParam        = nil
+    self.documentID          = documentID
+    self.undoManager         = undoManager
+    self.documentTextWillFlush = documentTextWillFlush
   }
 
   public class _Coordinator {
@@ -603,6 +619,20 @@ extension EnvironmentValues {
   @Entry public var codeEditorSetInfo: CodeEditor.SetInfo = .ignore
 }
 
+extension CodeEditor {
+
+  static func withoutUndoRegistration(using undoManager: UndoManager?, _ body: () -> Void) {
+    guard let undoManager, undoManager.isUndoRegistrationEnabled else {
+      body()
+      return
+    }
+
+    undoManager.disableUndoRegistration()
+    defer { undoManager.enableUndoRegistration() }
+    body()
+  }
+}
+
 
 #if os(iOS) || os(visionOS)
 
@@ -631,6 +661,8 @@ extension CodeEditor: UIViewRepresentable {
     let codeView = CodeView(frame: CGRect(x: 0, y: 0, width: 100, height: 40),
                             with: language,
                             viewLayout: definitiveLayout,
+                            documentID: documentID,
+                            undoManager: undoManager,
                             indentation: indentationConfiguration,
                             autoBrace: autoBraceConfiguration,
                             theme: context.environment.codeEditorTheme,
@@ -685,6 +717,19 @@ extension CodeEditor: UIViewRepresentable {
     let theme     = context.environment.codeEditorTheme,
         selection = position.selections.first ?? .zero
 
+    if codeView.documentID != documentID {
+      if let previousDocumentID = codeView.documentID {
+        let flushedText = codeView.consumeTextForDocumentSwitch()
+        Task { @MainActor in
+          documentTextWillFlush?(previousDocumentID, flushedText)
+        }
+      } else {
+        codeView.discardPendingTextPropagation()
+      }
+      codeView.documentID = documentID
+    }
+    codeView.documentUndoManager = undoManager
+
     context.coordinator.updateBindings(text: $text,
                                        position: $position,
                                        messages: $messages,
@@ -706,7 +751,9 @@ extension CodeEditor: UIViewRepresentable {
         if language.languageService !== codeView.language.languageService {
           (codeView.optCodeStorage?.delegate as? CodeStorageDelegate)?.skipNextChangeNotificationToLanguageService = true
         }
-        codeView.text = text
+        CodeEditor.withoutUndoRegistration(using: codeView.undoManager) {
+          codeView.text = text
+        }
 
         // Perform viewport layout to ensure content is visible immediately
         codeView.performInitialLayout()
@@ -815,6 +862,8 @@ extension CodeEditor: NSViewRepresentable {
     let codeView = CodeView(frame: CGRect(x: 0, y: 0, width: 100, height: 40),
                             with: language,
                             viewLayout: definitiveLayout,
+                            documentID: documentID,
+                            undoManager: undoManager,
                             indentation: indentationConfiguration,
                             autoBrace: autoBraceConfiguration,
                             theme: context.environment.codeEditorTheme,
@@ -923,6 +972,19 @@ extension CodeEditor: NSViewRepresentable {
     let theme      = context.environment.codeEditorTheme,
         selections = position.selections.map{ NSValue(range: $0) }
 
+    if codeView.documentID != documentID {
+      if let previousDocumentID = codeView.documentID {
+        let flushedText = codeView.consumeTextForDocumentSwitch()
+        Task { @MainActor in
+          documentTextWillFlush?(previousDocumentID, flushedText)
+        }
+      } else {
+        codeView.discardPendingTextPropagation()
+      }
+      codeView.documentID = documentID
+    }
+    codeView.documentUndoManager = undoManager
+
     context.coordinator.updateBindings(text: $text,
                                        position: $position,
                                        messages: $messages,
@@ -944,7 +1006,9 @@ extension CodeEditor: NSViewRepresentable {
         if language.languageService !== codeView.language.languageService {
           (codeView.optCodeStorage?.delegate as? CodeStorageDelegate)?.skipNextChangeNotificationToLanguageService = true
         }
-        codeView.string = text
+        CodeEditor.withoutUndoRegistration(using: codeView.undoManager) {
+          codeView.string = text
+        }
 
         // Perform viewport layout to ensure content is visible immediately
         codeView.performInitialLayout()

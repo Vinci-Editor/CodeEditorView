@@ -7,10 +7,31 @@
 
 import RegexBuilder
 import XCTest
+#if os(iOS) || os(visionOS)
+import UIKit
+#elseif os(macOS)
+import AppKit
+#endif
 @testable import CodeEditorView
 @testable import LanguageSupport
 
 final class TokenTests: XCTestCase {
+
+  private func makeSwiftStorage(_ code: String) -> (CodeStorageDelegate, CodeStorage) {
+    let codeStorageDelegate = CodeStorageDelegate(with: .swift(), setText: { _ in }),
+        codeStorage         = CodeStorage(theme: .defaultLight)
+    codeStorage.delegate = codeStorageDelegate
+    codeStorage.setAttributedString(NSAttributedString(string: code))
+    return (codeStorageDelegate, codeStorage)
+  }
+
+  private func makeLayoutManager(for codeStorage: CodeStorage) -> (NSTextLayoutManager, NSTextContentStorage) {
+    let textLayoutManager = NSTextLayoutManager(),
+        textContentStorage = NSTextContentStorage()
+    textContentStorage.addTextLayoutManager(textLayoutManager)
+    textContentStorage.textStorage = codeStorage
+    return (textLayoutManager, textContentStorage)
+  }
 
   override func setUpWithError() throws {
     // Put setup code here. This method is called before the invocation of each test method in the class.
@@ -298,6 +319,58 @@ test */
                    , Tokeniser.Token(token: .curlyBracketClose, range: NSRange(location: 17, length: 1))])
   }
 
+  func testInvalidatingLineClearsStaleTokensAndSkipsEnumeration() throws {
+    let (codeStorageDelegate, codeStorage) = makeSwiftStorage("let value = 1")
+    let lineRange = codeStorageDelegate.lineMap.charRangeOf(lines: 0..<1)
+
+    XCTAssertFalse(codeStorage.tokens(in: lineRange).isEmpty)
+
+    codeStorageDelegate.setTokenizationState(.invalidated, for: 0..<1)
+
+    XCTAssertEqual(codeStorageDelegate.lineMap.lookup(line: 0)?.info?.tokenizationState, .invalidated)
+    XCTAssertEqual(codeStorageDelegate.lineMap.lookup(line: 0)?.info?.tokens, [])
+    XCTAssertEqual(codeStorageDelegate.lineMap.lookup(line: 0)?.info?.commentRanges, [])
+    XCTAssertTrue(codeStorage.tokens(in: lineRange).isEmpty)
+  }
+
+  func testHighlightingTokenizesEveryRenderedInvalidatedLine() throws {
+    let code = (0..<8)
+      .map { "let value\($0) = \($0)" }
+      .joined(separator: "\n")
+    let (codeStorageDelegate, codeStorage) = makeSwiftStorage(code)
+    let renderedLines = 0..<8
+    let renderedRange = codeStorageDelegate.lineMap.charRangeOf(lines: renderedLines)
+    codeStorageDelegate.setTokenizationState(.invalidated, for: renderedLines)
+
+    let (textLayoutManager, textContentStorage) = makeLayoutManager(for: codeStorage)
+    XCTAssertNotNil(textContentStorage.textRange(for: renderedRange))
+
+    codeStorage.setHighlightingAttributes(for: renderedRange, in: textLayoutManager)
+
+    for line in renderedLines {
+      XCTAssertEqual(codeStorageDelegate.lineMap.lookup(line: line)?.info?.tokenizationState, .tokenized)
+      XCTAssertFalse(codeStorageDelegate.lineMap.lookup(line: line)?.info?.tokens.isEmpty ?? true)
+    }
+  }
+
+  func testTrailingTokenizationBudgetInvalidatesLaterDependentLines() throws {
+    let code = (0..<12)
+      .map { "let value\($0) = \($0)" }
+      .joined(separator: "\n")
+    let (codeStorageDelegate, codeStorage) = makeSwiftStorage(code)
+
+    codeStorage.replaceCharacters(in: NSRange(location: 0, length: 0), with: "/*\n")
+    let editedLineRange = codeStorageDelegate.lineMap.charRangeOf(lines: 0..<1)
+
+    let _ = codeStorageDelegate.tokenise(range: editedLineRange, in: codeStorage, maxTrailingLines: 1)
+
+    XCTAssertEqual(codeStorageDelegate.lineMap.lookup(line: 0)?.info?.tokenizationState, .tokenized)
+    XCTAssertEqual(codeStorageDelegate.lineMap.lookup(line: 1)?.info?.tokenizationState, .tokenized)
+    XCTAssertEqual(codeStorageDelegate.lineMap.lookup(line: 2)?.info?.tokenizationState, .invalidated)
+    XCTAssertEqual(codeStorageDelegate.lineMap.lookup(line: 2)?.info?.tokens, [])
+    XCTAssertEqual(codeStorageDelegate.lineMap.lookup(line: 2)?.info?.commentRanges, [])
+  }
+
   static var allTests = [
     ("testSimpleTokenise", testSimpleTokenise),
     ("testTokeniseAllComment", testTokeniseAllComment),
@@ -309,6 +382,12 @@ test */
     ("testCaseInsensitiveReservedIdentifiersUnspecified", testCaseInsensitiveReservedIdentifiersUnspecified),
     ("testCaseInsensitiveReservedIdentifiersFalse", testCaseInsensitiveReservedIdentifiersFalse),
     ("testCaseInsensitiveReservedIdentifiersTrue", testCaseInsensitiveReservedIdentifiersTrue),
+    ("testInvalidatingLineClearsStaleTokensAndSkipsEnumeration",
+     testInvalidatingLineClearsStaleTokensAndSkipsEnumeration),
+    ("testHighlightingTokenizesEveryRenderedInvalidatedLine",
+     testHighlightingTokenizesEveryRenderedInvalidatedLine),
+    ("testTrailingTokenizationBudgetInvalidatesLaterDependentLines",
+     testTrailingTokenizationBudgetInvalidatesLaterDependentLines),
   ]
 }
 

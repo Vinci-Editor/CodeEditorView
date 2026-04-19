@@ -16,6 +16,11 @@ struct LineMap<LineInfo> {
   ///
   typealias OneLine = (range: NSRange, info: LineInfo?)
 
+  struct EditResult {
+    let oldLineRange: Range<Int>
+    let newLineRange: Range<Int>
+  }
+
   /// One entry per line of the underlying string.
   ///
   var lines: [OneLine] = []
@@ -238,7 +243,8 @@ struct LineMap<LineInfo> {
   /// NB: The line after the `editedRange` will be updated (and info fields be invalidated) if the `editedRange` ends on
   ///     a newline.
   ///
-  mutating func updateAfterEditing(string: String, range editedRange: NSRange, changeInLength delta: Int) {
+  @discardableResult
+  mutating func updateAfterEditing(string: String, range editedRange: NSRange, changeInLength delta: Int) -> EditResult {
 
     // To compute line ranges, we extend all character ranges by one extra character. This is crucial as, if the
     // edited range ends on a newline, this may insert a new line break, which means, we also need to update the line
@@ -258,12 +264,15 @@ struct LineMap<LineInfo> {
         adjustedNewLines = dropEmptyNewLine ? newLines.dropLast() : newLines
 
     lines.replaceSubrange(oldLinesRange, with: adjustedNewLines)
+    let replacementLineRange = oldLinesRange.lowerBound..<(oldLinesRange.lowerBound + adjustedNewLines.count)
 
     // All ranges after the edited range of lines need to be adjusted.
     //
     for i in oldLinesRange.startIndex.advanced(by: adjustedNewLines.count) ..< lines.count {
       lines[i] = shift(line: lines[i], by: delta)
     }
+
+    return EditResult(oldLineRange: oldLinesRange, newLineRange: replacementLineRange)
   }
 
   // MARK: -
