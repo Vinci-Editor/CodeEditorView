@@ -44,6 +44,24 @@ public final class TreeSitterTokenizer {
   ///
   private var isParsed: Bool { tree != nil }
 
+  /// Captured token plus the originating capture name for deterministic conflict resolution.
+  ///
+  private struct CapturedToken {
+    var token: LanguageConfiguration.Tokeniser.Token
+    var captureName: String
+    var priority: Int
+  }
+
+  private struct RangeKey: Hashable {
+    var location: Int
+    var length: Int
+
+    init(_ range: NSRange) {
+      self.location = range.location
+      self.length = range.length
+    }
+  }
+
   // MARK: - Initialization
 
   /// Creates a tree-sitter tokenizer for a specific language.
@@ -61,9 +79,8 @@ public final class TreeSitterTokenizer {
     self.language = language
     self.captureMapping = captureMapping
 
-    // Try to compile the highlight query
     if let queryData = highlightQuerySource.data(using: .utf8) {
-      self.highlightQuery = try? Query(language: language, data: queryData)
+      self.highlightQuery = try Query(language: language, data: queryData)
     } else {
       self.highlightQuery = nil
     }
@@ -117,7 +134,8 @@ public final class TreeSitterTokenizer {
 
     let context = Predicate.Context(string: lastText)
 
-    var tokens: [LanguageConfiguration.Tokeniser.Token] = []
+    var tokens: [CapturedToken] = []
+    var tokenIndicesByRange: [RangeKey: Int] = [:]
     for match in cursor.resolve(with: context) {
       for capture in match.captures {
         guard let captureName = capture.name,
@@ -126,18 +144,99 @@ public final class TreeSitterTokenizer {
 
         let captureRange = capture.node.range
         if let range, (captureRange.intersection(range)?.length ?? 0) <= 0 { continue }
-        tokens.append(LanguageConfiguration.Tokeniser.Token(token: tokenType, range: captureRange))
+        let capturedToken = CapturedToken(
+          token: LanguageConfiguration.Tokeniser.Token(token: tokenType, range: captureRange),
+          captureName: captureName,
+          priority: Self.capturePriority(for: captureName, token: tokenType)
+        )
+        let rangeKey = RangeKey(captureRange)
+        if let existingIndex = tokenIndicesByRange[rangeKey] {
+          let existingToken = tokens[existingIndex]
+          if Self.shouldReplace(existingToken, with: capturedToken) {
+            tokens[existingIndex] = capturedToken
+          }
+        } else {
+          tokenIndicesByRange[rangeKey] = tokens.count
+          tokens.append(capturedToken)
+        }
       }
     }
 
     tokens.sort {
-      if $0.range.location != $1.range.location { return $0.range.location < $1.range.location }
-      return $0.range.length > $1.range.length
+      if $0.token.range.location != $1.token.range.location {
+        return $0.token.range.location < $1.token.range.location
+      }
+      if $0.token.range.length != $1.token.range.length {
+        return $0.token.range.length > $1.token.range.length
+      }
+      if $0.priority != $1.priority {
+        return $0.priority > $1.priority
+      }
+      return $0.captureName < $1.captureName
     }
-    return tokens
+    return tokens.map(\.token)
   }
 
   // MARK: - Helpers
+
+  private static func shouldReplace(_ existing: CapturedToken, with candidate: CapturedToken) -> Bool {
+    if candidate.priority != existing.priority {
+      return candidate.priority > existing.priority
+    }
+
+    return candidate.captureName < existing.captureName
+  }
+
+  private static func capturePriority(for captureName: String, token: LanguageConfiguration.Token) -> Int {
+    switch captureName {
+    case "string.escape":
+      return 900
+    case "type.constructor", "constructor", "type.builtin", "type":
+      return 850
+    case "function.macro", "constant.macro", "attribute":
+      return 800
+    case "function.method", "function.call":
+      return 700
+    case "variable.member", "property":
+      return 650
+    case "variable.parameter":
+      return 600
+    case "keyword", "keyword.function", "keyword.modifier", "keyword.type", "keyword.coroutine",
+         "keyword.directive", "keyword.import", "keyword.repeat", "keyword.conditional",
+         "keyword.conditional.ternary", "keyword.return", "keyword.exception", "keyword.operator":
+      return 550
+    case "operator", "punctuation.special", "punctuation.bracket", "punctuation.delimiter":
+      return 500
+    case "string", "string.regexp":
+      return 450
+    default:
+      switch token {
+      case .identifier(let flavour):
+        switch flavour {
+        case .type(_):
+          return 850
+        case .macro:
+          return 800
+        case .function, .method:
+          return 700
+        case .property:
+          return 650
+        case .parameter, .typeParameter:
+          return 600
+        default:
+          return 100
+        }
+      case .keyword:
+        return 550
+      case .operator, .symbol:
+        return 500
+      case .string, .regexp:
+        return 450
+      default:
+        return 100
+      }
+    }
+  }
 
   /// Create a tree-sitter InputEdit from edit information.
   ///
@@ -235,8 +334,9 @@ public struct TreeSitterCaptureMappings {
     "comment.documentation": .singleLineComment,
 
     // Identifiers
-    "attribute": .keyword,
+    "attribute": .identifier(.macro),
     "type": .identifier(.type(.other)),
+    "type.constructor": .identifier(.type(.other)),
     "type.builtin": .identifier(.type(.other)),
     "variable": .identifier(.variable),
     "variable.builtin": .identifier(.variable),

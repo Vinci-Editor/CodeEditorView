@@ -1172,6 +1172,32 @@ final class CodeView: NSTextView {
   ///
   var documentUndoManager: UndoManager?
 
+  override var undoManager: UndoManager? {
+    documentUndoManager ?? super.undoManager
+  }
+
+  @objc func undo(_ sender: Any?) {
+    codeStorageDelegate.flushPendingSetText()
+    guard let undoManager, undoManager.canUndo else { return }
+    undoManager.undo()
+  }
+
+  @objc func redo(_ sender: Any?) {
+    codeStorageDelegate.flushPendingSetText()
+    guard let undoManager, undoManager.canRedo else { return }
+    undoManager.redo()
+  }
+
+  override func validateUserInterfaceItem(_ item: any NSValidatedUserInterfaceItem) -> Bool {
+    if item.action == #selector(undo(_:)) {
+      return undoManager?.canUndo == true
+    }
+    if item.action == #selector(redo(_:)) {
+      return undoManager?.canRedo == true
+    }
+    return super.validateUserInterfaceItem(item)
+  }
+
   /// The current indentation configuration.
   ///
   var indentation: CodeEditor.IndentationConfiguration = .standard
@@ -2220,6 +2246,7 @@ extension CodeView {
 
     DispatchQueue.main.async { [self] in
       collapseMessageViews()
+      layoutMessageViews()
       updateMessageLineHighlights()
     }
   }
@@ -2264,6 +2291,7 @@ extension CodeView {
     // NOTE: Removed ensureLayout() call - layout should already be available from TextKit 2
 
     for messageView in messageViews {
+      guard messageView.value.lineFragementRect != .zero else { continue }
 
       if let telescopeCharacterIndex = messageView.value.characterIndexTelescope,
          !messageView.value.invalidated     // No telesopes for invalidates messages
@@ -2406,6 +2434,7 @@ extension CodeView {
     if let textLocation = optTextContentStorage?.textLocation(for: selectedRange.location) {
       updateCurrentLineHighlight(for: textLocation)
     }
+    layoutMessageViews()
     updateMessageLineHighlights()
 
     // Position the minimap correctly
@@ -2742,55 +2771,80 @@ extension CodeView {
     guard let textLayoutManager  = textLayoutManager,
           let textContentManager = textLayoutManager.textContentManager as? NSTextContentStorage,
           let codeContainer      = optTextContainer as? CodeContainer,
-          let messageBundle      = messageViews[id]
+          let messageBundle      = messageViews[id],
+          messageBundle.lineFragementRect != .zero
     else { return }
 
-    if messageBundle.geometry == nil {
+    guard let startLocation         = textContentManager.textLocation(for: messageBundle.characterIndex),
+          let textLayoutFragment    = textLayoutManager.textLayoutFragment(for: startLocation),
+          let firstLineFragmentRect = textLayoutFragment.textLineFragments.first?.typographicBounds
+    else { return }
 
-      guard let startLocation         = textContentManager.textLocation(for: messageBundle.characterIndex),
-            let textLayoutFragment    = textLayoutManager.textLayoutFragment(for: startLocation),
-            let firstLineFragmentRect = textLayoutFragment.textLineFragments.first?.typographicBounds
-      else { return }
+    let rightOffset = messageRightAnchorOffset(for: messageBundle.lineFragementRect)
+    let lineTextEnd = textContainerOrigin.x + firstLineFragmentRect.maxX
+    let lineWidth = max(MessageView.minimumInlineWidth, rightOffset - lineTextEnd)
+    let popupWidth = min(
+      max(MessageView.minimumInlineWidth, (visibleMessageWidth - MessageView.popupRightSideOffset) * 0.75),
+      max(MessageView.minimumInlineWidth, (codeContainer.size.width - MessageView.popupRightSideOffset) * 0.75)
+    )
 
-      // Compute the message view geometry from the text layout information
-      let geometry = MessageView.Geometry(lineWidth: messageBundle.lineFragementRect.width - firstLineFragmentRect.maxX,
-                                          lineHeight: firstLineFragmentRect.height,
-                                          popupWidth:
-                                            (codeContainer.size.width - MessageView.popupRightSideOffset) * 0.75,
-                                          popupOffset: textLayoutFragment.layoutFragmentFrame.height + 2)
-      messageViews[id]?.geometry = geometry
+    // Compute the message view geometry from the text layout information
+    let geometry = MessageView.Geometry(lineWidth: lineWidth,
+                                        lineHeight: firstLineFragmentRect.height,
+                                        popupWidth: popupWidth,
+                                        popupOffset: textLayoutFragment.layoutFragmentFrame.height + 2)
+    messageViews[id]?.geometry = geometry
 
-      // Configure the view with the new geometry
-      messageBundle.view.geometry = geometry
-      if messageBundle.view.superview == nil {
+    // Configure the view with the new geometry
+    messageBundle.view.geometry = geometry
+    if messageBundle.view.superview == nil {
 
-        // Add the messages view
-        addSubview(messageBundle.view)
-        let topOffset           = textContainerOrigin.y + messageBundle.lineFragementRect.minY,
-            topAnchorConstraint = messageBundle.view.topAnchor.constraint(equalTo: self.topAnchor,
-                                                                          constant: topOffset)
-        let leftOffset            = textContainerOrigin.x + messageBundle.lineFragementRect.maxX,
-            rightAnchorConstraint = messageBundle.view.rightAnchor.constraint(equalTo: self.leftAnchor,
-                                                                              constant: leftOffset)
-        messageViews[id]?.topAnchorConstraint   = topAnchorConstraint
-        messageViews[id]?.rightAnchorConstraint = rightAnchorConstraint
-        NSLayoutConstraint.activate([topAnchorConstraint, rightAnchorConstraint])
+      // Add the messages view
+      addSubview(messageBundle.view)
+      let topOffset           = textContainerOrigin.y + messageBundle.lineFragementRect.minY,
+          topAnchorConstraint = messageBundle.view.topAnchor.constraint(equalTo: self.topAnchor,
+                                                                        constant: topOffset)
+      let rightAnchorConstraint = messageBundle.view.rightAnchor.constraint(equalTo: self.leftAnchor,
+                                                                            constant: rightOffset)
+      messageViews[id]?.topAnchorConstraint   = topAnchorConstraint
+      messageViews[id]?.rightAnchorConstraint = rightAnchorConstraint
+      NSLayoutConstraint.activate([topAnchorConstraint, rightAnchorConstraint])
 
-        // Also add the corresponding background highlight view, such that it lies on top of the current line highlight.
-        if let currentLineHighlightView {
-          insertSubview(messageBundle.backgroundView, aboveSubview: currentLineHighlightView)
-        }
-
-      } else {
-
-        // Update the messages view constraints
-        let topOffset  = textContainerOrigin.y + messageBundle.lineFragementRect.minY,
-            leftOffset = textContainerOrigin.x + messageBundle.lineFragementRect.maxX
-        messageViews[id]?.topAnchorConstraint?.constant   = topOffset
-        messageViews[id]?.rightAnchorConstraint?.constant = leftOffset
-
+      // Also add the corresponding background highlight view, such that it lies on top of the current line highlight.
+      if let currentLineHighlightView {
+        insertSubview(messageBundle.backgroundView, aboveSubview: currentLineHighlightView)
       }
+
+    } else {
+
+      // Update the messages view constraints
+      let topOffset = textContainerOrigin.y + messageBundle.lineFragementRect.minY
+      messageViews[id]?.topAnchorConstraint?.constant   = topOffset
+      messageViews[id]?.rightAnchorConstraint?.constant = rightOffset
+
     }
+
+    updateMessageLineHighlights()
+  }
+
+  fileprivate func layoutMessageViews() {
+    for id in messageViews.keys {
+      layoutMessageView(identifiedBy: id)
+    }
+  }
+
+  private var visibleMessageWidth: CGFloat {
+    enclosingScrollView?.documentVisibleRect.width ?? bounds.width
+  }
+
+  private func messageRightAnchorOffset(for lineFragmentRect: CGRect) -> CGFloat {
+    let lineRight = textContainerOrigin.x + lineFragmentRect.maxX
+    guard let visibleRect = enclosingScrollView?.documentVisibleRect else {
+      return lineRight
+    }
+
+    let visibleRight = max(visibleRect.minX + MessageView.minimumInlineWidth, visibleRect.maxX - 12)
+    return min(lineRight, visibleRight)
   }
   
   /// Update the whole set of current messages to a new set.
@@ -2858,13 +2912,16 @@ extension CodeView {
         principalCategory = messagesByCategory(messageBundle.messages.map(\.1))[0].key,
         colour            = messageTheme(principalCategory).colour,
         backgroundView    = CodeBackgroundHighlightView(color: colour.withAlphaComponent(0.1)),
-        telescope: Int?   = if messageBundle.messages.count == 1 { messageBundle.messages[0].1.telescope } else { nil }
+        telescope: Int?   = if messageBundle.messages.count == 1 { messageBundle.messages[0].1.telescope } else { nil },
+        characterIndexTelescope = telescope.flatMap { telescope in
+          codeStorageDelegate.lineMap.lookup(line: line + telescope)?.range.max
+        }
 
     messageViews[messageBundle.id] = MessageInfo(view: messageView,
                                                  backgroundView: backgroundView,
-                                                 characterIndex: 0,
+                                                 characterIndex: charRange.location,
                                                  telescope: telescope,
-                                                 characterIndexTelescope: telescope.map{ _ in 0 },
+                                                 characterIndexTelescope: characterIndexTelescope,
                                                  lineFragementRect: .zero,
                                                  geometry: nil,
                                                  colour: colour,
@@ -2875,9 +2932,9 @@ extension CodeView {
     if let textRange = optTextContentStorage?.textRange(for: charRange) {
 
       optTextLayoutManager?.invalidateLayout(for: textRange)
+      optTextLayoutManager?.textViewportLayoutController.layoutViewport()
 
     }
-    updateMessageLineHighlights()
   }
 
   /// Remove the messages associated with a specified range of lines.

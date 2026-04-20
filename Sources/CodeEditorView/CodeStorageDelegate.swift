@@ -593,13 +593,18 @@ class CodeStorageDelegate: NSObject, NSTextStorageDelegate, @unchecked Sendable 
     var highlightingRange: NSRange
     var highlightingLines: Int
 
-    // Always defer tokenization to background - mark affected lines as invalidated
-    // The BackgroundTokenizer will pick these up and tokenize them
     if isInitialLoad && isLargeDocument {
       // Large initial load - mark ALL lines as pending
       setTokenizationState(.pending, for: 0..<lineCount)
       highlightingRange = .zero
       highlightingLines = 0
+    } else if isInitialLoad {
+      // Small initial loads seed regex line state synchronously. Tree-sitter may render the text, but editor mechanics
+      // still need the line map to know comments, brackets, and token completion context.
+      let tokenizationRange = lineMap.charRangeOf(lines: invalidationLines)
+      let tokenizationResult = tokenise(range: tokenizationRange, in: textStorage)
+      highlightingRange = tokenizationResult.affectedRange
+      highlightingLines = tokenizationResult.lines
     } else {
       // Regular edit - mark affected lines as invalidated
       setTokenizationState(.invalidated, for: invalidationLines)

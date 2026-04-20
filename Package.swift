@@ -30,7 +30,10 @@ let package = Package(
     .target(
       name: "TreeSitterSwiftGrammar",
       path: "Sources/TreeSitterSwiftGrammar",
-      sources: ["src/parser.c"],
+      sources: [
+        "src/parser.c",
+        "src/scanner.c",
+      ],
       publicHeadersPath: "include",
       cSettings: [
         .headerSearchPath("src"),
@@ -54,6 +57,6 @@ let package = Package(
       ]),
     .testTarget(
       name: "CodeEditorTests",
-      dependencies: ["CodeEditorView"]),
+      dependencies: ["CodeEditorView", "LanguageSupport"]),
   ]
 )

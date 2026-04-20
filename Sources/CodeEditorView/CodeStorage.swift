@@ -214,9 +214,21 @@ extension CodeStorage {
                                              for: textRange)
       }
 
-      // Tree-sitter viewport highlighting (preferred when configured).
       let viewportCharRange: NSRange? = layoutManager.textViewportLayoutController.viewportRange
         .map { contentStorage.range(for: $0) }
+
+      // On-demand tokenization: every line in the range being rendered must have current token data before painting.
+      // Background tokenization remains useful for offscreen work, but visible text must not render stale line info.
+      let lines = delegate.lineMap.linesContaining(range: range)
+      if let tokenizationLines = delegate.tokenizationRangeForRendering(lines: lines) {
+        let tokenizationRange = delegate.lineMap.charRangeOf(lines: tokenizationLines)
+        let tokenizationResult = delegate.tokenise(range: tokenizationRange, in: self)
+        invalidateRetokenizedRangesOutsideRenderedRange(tokenizationResult.affectedRange, viewport: viewportCharRange)
+        CodeEditorInstrumentation.record(.syncTokenizedLines)
+      }
+
+      // Tree-sitter viewport highlighting is the preferred render source when configured. The regex tokenizer above
+      // still maintains line state for editing, matching, and completion.
       let usedTreeSitter = delegate.enumerateTreeSitterHighlightTokens(in: range,
                                                                        viewport: viewportCharRange,
                                                                        layoutManager: layoutManager) { token in
@@ -229,16 +241,6 @@ extension CodeStorage {
         layoutManager.setRenderingAttributes([.foregroundColor: colour], for: textRange)
       }
       if usedTreeSitter { return }
-
-      // On-demand tokenization: every line in the range being rendered must have current token data before painting.
-      // Background tokenization remains useful for offscreen work, but visible text must not render stale line info.
-      let lines = delegate.lineMap.linesContaining(range: range)
-      if let tokenizationLines = delegate.tokenizationRangeForRendering(lines: lines) {
-        let tokenizationRange = delegate.lineMap.charRangeOf(lines: tokenizationLines)
-        let tokenizationResult = delegate.tokenise(range: tokenizationRange, in: self)
-        invalidateRetokenizedRangesOutsideRenderedRange(tokenizationResult.affectedRange, viewport: viewportCharRange)
-        CodeEditorInstrumentation.record(.syncTokenizedLines)
-      }
 
       // Pass 2: Enumerate ALL tokens in range.
       enumerateTokens(in: range) { lineToken in
